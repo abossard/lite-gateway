@@ -8,6 +8,11 @@ High-performance .NET 10 Native AOT scaffold for an mTLS reverse proxy and a mat
 - **Load Client (`src/LiteGateway.LoadClient`)**: async load generator with a real terminal TUI dashboard (live RPS/p95 graphs, throughput, latency, inflight, errors, opened TCP connections), matrix mode, and autotune.
 - **Certificates (`scripts/generate-mtls-certs.sh`)**: local ECDSA P-256 CA/server/client cert generation for reproducible mTLS runs.
 
+## Architecture
+![Lite Gateway architecture](docs/architecture.svg)
+
+Draw.io source: `docs/architecture.drawio`
+
 ## Project Setup
 
 ### Prerequisites
@@ -57,6 +62,52 @@ Matrix mode tests, in sequence:
 - HTTP reuse / HTTP no-reuse
 - HTTPS reuse / HTTPS no-reuse
 - HTTPS+mTLS reuse / HTTPS+mTLS no-reuse
+
+### 5) One-command automation (certs + build + matrix)
+```bash
+# Quick profile (recommended for day-to-day checks)
+./scripts/run-everything.sh --quick --proxy both
+
+# Full profile (uses load client matrix defaults; much longer)
+./scripts/run-everything.sh --full --proxy both
+```
+
+What it does:
+- Regenerates ECDSA certs (`certs/generated`) unless `--skip-certs` is passed.
+- Builds .NET proxy + load client (and Rust proxy when requested) unless `--skip-build` is passed.
+- Runs matrix mode against the .NET and/or Rust proxy on ports `8080`, `8443`, `9443`.
+- Stores logs under `.run-logs/` (`dotnet-proxy.log`, `dotnet-matrix.log`, `rust-proxy.log`, `rust-matrix.log`).
+
+### 6) Docker end-to-end automation (both proxies + host client)
+```bash
+# Quick profile (tested)
+./scripts/run-docker-matrix.sh --quick --proxy both
+
+# Full profile (longer)
+./scripts/run-docker-matrix.sh --full --proxy both
+```
+
+Docker host port mappings:
+- .NET proxy: `18080` / `18443` / `19443` -> container `8080` / `8443` / `9443`
+- Rust proxy: `28080` / `28443` / `29443` -> container `8080` / `8443` / `9443`
+
+What the Docker script does:
+- Regenerates certs and builds host load client.
+- Builds Docker images from `src/LiteGateway.Proxy/Dockerfile` and `src/LiteGateway.Proxy.Rust/Dockerfile`.
+- Starts requested services from `docker-compose.yml`.
+- Runs matrix client against each containerized proxy using mapped URLs.
+- Writes logs to `.run-logs/docker/`.
+
+Latest tested Docker quick-run summary (`--quick --proxy both`, local machine):
+
+| Scenario | .NET in Docker | Rust in Docker |
+| --- | ---: | ---: |
+| http-reuse | 19.43 | 20.90 |
+| http-no-reuse | 19.42 | 19.42 |
+| https-reuse | 25.91 | 24.91 |
+| https-no-reuse | 19.87 | 19.41 |
+| https-mtls-reuse | 20.56 | 20.03 |
+| https-mtls-no-reuse | 19.40 | 19.41 |
 
 ### Recommended for performance runs: Release Native AOT binaries
 `dotnet run` is fine for local dev, but benchmark runs should use published Release AOT binaries.

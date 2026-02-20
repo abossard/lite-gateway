@@ -1,0 +1,52 @@
+<mxfile host="app.diagrams.net" modified="2026-02-20T08:00:00.000Z" agent="Mozilla/5.0" version="24.7.17">
+  <diagram id="lite-gateway-architecture" name="Architecture">
+    <mxGraphModel dx="1433" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="runner" value="scripts/run-docker-matrix.sh&#10;(or run-everything.sh)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="70" width="250" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="certs" value="certs/generated&#10;CA + server + client certs&#10;(ECDSA P-256)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="40" y="220" width="250" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="client" value="LiteGateway.LoadClient&#10;matrix/autotune runner&#10;(.NET host process)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="360" y="70" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="dotnet" value="Docker: dotnet-proxy&#10;host ports 18080/18443/19443&#10;container 8080/8443/9443" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="700" y="50" width="300" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="rust" value="Docker: rust-proxy&#10;host ports 28080/28443/29443&#10;container 8080/8443/9443" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="700" y="210" width="300" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="logs" value=".run-logs/&#10;dotnet/rust proxy + matrix output" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="360" y="240" width="260" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" edge="1" parent="1" source="runner" target="certs" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" edge="1" parent="1" source="runner" target="client" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" edge="1" parent="1" source="certs" target="client" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" edge="1" parent="1" source="client" target="dotnet" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" edge="1" parent="1" source="client" target="rust" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" edge="1" parent="1" source="certs" target="dotnet" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" edge="1" parent="1" source="certs" target="rust" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" edge="1" parent="1" source="client" target="logs" style="endArrow=block;html=1;rounded=0;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

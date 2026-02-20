@@ -1,0 +1,7 @@
+.git
+.run-logs
+certs/generated
+**/bin
+**/obj
+**/target
+**/.DS_Store
