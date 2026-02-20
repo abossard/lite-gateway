@@ -1,0 +1,19 @@
+.DS_Store
+
+# .NET build artifacts
+**/bin/
+**/obj/
+**/TestResults/
+**/*.user
+**/*.rsuser
+**/*.suo
+**/*.userosscache
+**/*.sln.docstates
+**/.vs/
+
+# Rust build artifacts
+**/target/
+**/*.rs.bk
+
+# Local cert/test artifacts
+certs/generated/

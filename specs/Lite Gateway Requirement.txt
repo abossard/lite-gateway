@@ -1,0 +1,60 @@
+﻿Lite Gateway Requirement
+System Architecture & Deployment
+The Lite Gateway (LGW) is a high-performance, Windows-based middleware designed to replace the legacy IIS-based POC, providing a bridge between local instruments and the Cloud Gateway (CGW).
+Feature
+	Requirement
+	Operating System
+	Must run as a Windows Service with "Automatic" start-up type.
+	Scalability
+	Must support a minimum of 3,000 local instruments simultaneously.
+	Platform Parity
+	Architecture must support both Windows and K8S (for navify Integrator compatibility).
+	Reverse Proxy
+	Must act as a transparent reverse proxy between Local Devices and the Cloud Gateway.
+	Data Handling
+	Support for bidirectional streaming and large file transfers.
+	________________
+
+
+2. Communication & Security
+Security is anchored on a "Never Trust, Always Verify" model using Mutual TLS.
+* mTLS Enforcement: Enforce mTLS (Mutual TLS) on port 443 for all inbound (Device-to-LGW) and outbound (LGW-to-CGW) traffic.
+* Certificate Storage: Utilize the Windows LocalMachine Certificate Store for all identities.
+* Payload Integrity: Operate in Pass-through Mode; the LGW shall not modify original payloads except for header enrichment.
+* Header Enrichment: Automatically append the Customer ID header to all outbound requests to the CGW.
+________________
+
+
+3. The CG Agent (Management & Orchestration)
+The CG Agent is the control-plane component of the Lite Gateway.
+Synchronization & Telemetry
+* Polling: Configurable polling interval (default 10–15 minutes) to fetch commands from the CGW.
+* Observability: Automatically upload error logs, system telemetry, and resource metrics to the CGW.
+* Storage Reporting: Report local storage directory paths to the CGW during every sync heartbeat.
+Remote Operations
+* Command Execution: Execute remote Start, Stop, and Restart commands issued by the CGW.
+* Lifecycle Management: Support remote Software Deployment and Version Rollback via the Agent.
+* Caching: Support "Download and Cache" logic for Lot data, Software and config files to optimize local instrument access.
+________________
+
+
+4. Installation & Migration Logic
+The installer must handle the transition from the legacy IIS environment gracefully.
+1. Privileges: Installer requires Elevated (Administrator) permissions.
+2. Environment Setup: Allow user-defined installation directories for fresh installs.
+3. Migration Workflow:
+   * Stop the existing IIS service.
+   * Install Lite Gateway and migrate existing configurations.
+   * Validation Gate: Validate connectivity with the Cloud Manager (CM).
+   * Auto-Rollback: If connectivity fails, the installer must uninstall LGW and restart the original IIS service to prevent downtime.
+4. Packaging: Must integrate with REA packaging standards.
+________________
+
+
+5. Local Management (Web UI)
+The LGW shall expose a local, authenticated Web Interface for onsite administrators.
+* Dashboard: Real-time visibility into Health, Resource Usage (CPU/RAM), Network Status, and Integration/Agent status.
+* Certificate Management: Support Manual/Forced Certificate Rotation triggered by the CM.
+* Local Controls: 
+   * Provide manual overrides to Start or Stop the Gateway service.
+   * Feature to send the local logs via email or via agent.
