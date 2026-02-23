@@ -18,3 +18,4 @@
 # Local cert/test artifacts
 certs/generated/
 .run-logs/
+.temp/
