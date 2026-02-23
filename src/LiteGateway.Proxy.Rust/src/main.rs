@@ -31,8 +31,6 @@ use tracing_subscriber::EnvFilter;
 use url::Url;
 
 type ResponseBody = Full<Bytes>;
-
-const STANDALONE_BODY: &[u8] = br#"{"status":"ok","mode":"standalone"}"#;
 const ENV_PROXY_PREFIX: &str = "LITEGATEWAY_Proxy__";
 const ENV_RUST_PROXY_PREFIX: &str = "LITEGATEWAY_RustProxy__";
 
@@ -307,30 +305,54 @@ async fn handle_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
 ) -> Result<Response<ResponseBody>, Infallible> {
-    sleep(state.sleep_duration).await;
-
     let response = match state.upstream_url.as_ref() {
-        Some(base_url) => forward_request(request, base_url, &state).await,
-        None => standalone_response(&request, state.pass_connection_close),
+        Some(base_url) => {
+            sleep(state.sleep_duration).await;
+            forward_request(request, base_url, &state).await
+        }
+        None => {
+            let (parts, body) = request.into_parts();
+            let request_headers = parts.headers;
+            let request_content_type = request_headers.get(header::CONTENT_TYPE).cloned();
+            let request_body = match body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(error) => {
+                    warn!("failed to read downstream request body: {error}");
+                    return Ok(empty_response(StatusCode::BAD_REQUEST));
+                }
+            };
+
+            sleep(state.sleep_duration).await;
+            standalone_response(
+                &request_headers,
+                request_content_type.as_ref(),
+                request_body,
+                state.pass_connection_close,
+            )
+        }
     };
 
     Ok(response)
 }
 
 fn standalone_response(
-    request: &Request<Incoming>,
+    request_headers: &HeaderMap,
+    request_content_type: Option<&header::HeaderValue>,
+    request_body: Bytes,
     pass_connection_close: bool,
 ) -> Response<ResponseBody> {
-    let body = Bytes::from_static(STANDALONE_BODY);
-    let mut response = Response::new(Full::new(body.clone()));
+    let body_length = request_body.len();
+    let mut response = Response::new(Full::new(request_body));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        header::HeaderValue::from_static("application/json"),
+        request_content_type
+            .cloned()
+            .unwrap_or_else(|| header::HeaderValue::from_static("application/json")),
     );
-    insert_content_length(response.headers_mut(), body.len());
+    insert_content_length(response.headers_mut(), body_length);
 
-    if pass_connection_close && connection_close_requested(request.headers()) {
+    if pass_connection_close && connection_close_requested(request_headers) {
         response.headers_mut().insert(
             header::CONNECTION,
             header::HeaderValue::from_static("close"),

@@ -3,9 +3,9 @@
 High-performance .NET 10 Native AOT scaffold for an mTLS reverse proxy and a matching high-concurrency CLI load client.
 
 ## Concept
-- **Proxy (`src/LiteGateway.Proxy`)**: allocation-conscious Kestrel service with three simultaneous endpoints: HTTP (`8080`), HTTPS (`8443`, no client cert), and HTTPS+mTLS (`9443`), plus async per-request delay path (default `5s`) and optional upstream forwarding.
-- **Rust Proxy (`src/LiteGateway.Proxy.Rust`)**: equivalent async proxy behavior using Hyper + Rustls with the same endpoint model (HTTP/HTTPS/mTLS), async delay path, and optional upstream forwarding.
-- **Load Client (`src/LiteGateway.LoadClient`)**: async load generator with a real terminal TUI dashboard (live RPS/p95 graphs, throughput, latency, inflight, errors, opened TCP connections), matrix mode, and autotune.
+- **Proxy (`src/LiteGateway.Proxy`)**: allocation-conscious Kestrel service with three simultaneous endpoints: HTTP (`8080`), HTTPS (`8443`, no client cert), and HTTPS+mTLS (`9443`), plus async per-request delay path (default `5s`) and optional upstream forwarding; standalone mode echoes request JSON after the delay.
+- **Rust Proxy (`src/LiteGateway.Proxy.Rust`)**: equivalent async proxy behavior using Hyper + Rustls with the same endpoint model (HTTP/HTTPS/mTLS), async delay path, optional upstream forwarding, and standalone request-body echo.
+- **Load Client (`src/LiteGateway.LoadClient`)**: async load generator with a real terminal TUI dashboard (live RPS/p95 graphs, throughput, latency, inflight, errors, opened TCP connections), matrix mode, and autotune. Default request/validation behavior is `POST` JSON + correlation query and response assertions (status `200`, `$.correlationId` match).
 - **Certificates (`scripts/generate-mtls-certs.sh`)**: local ECDSA P-256 CA/server/client cert generation for reproducible mTLS runs.
 
 ## Architecture
@@ -42,7 +42,7 @@ cargo run --manifest-path src/LiteGateway.Proxy.Rust/Cargo.toml --release
 ### 3) Run load client
 ```bash
 dotnet run --project src/LiteGateway.LoadClient/LiteGateway.LoadClient.csproj --no-build -- \
-  --url https://localhost:9443/ \
+  --url https://localhost:9443/api/test \
   --cert-pfx "$CLIENT_PFX" \
   --cert-password "$CLIENT_PFX_PASSWORD" \
   --custom-ca "$CLIENT_CA_CERT" \
@@ -97,6 +97,38 @@ What the Docker script does:
 - Starts requested services from `docker-compose.yml`.
 - Runs matrix client against each containerized proxy using mapped URLs.
 - Writes logs to `.run-logs/docker/`.
+
+### 7) Run the reference JMeter plan (non-GUI)
+```bash
+# Run the git-managed test plan copy against both services
+./scripts/run-jmeter-testplan.sh --proxy both
+
+# Run with the built-in high-scale preset
+./scripts/run-jmeter-testplan.sh --proxy both --high-scale
+
+# Or explicitly point to the tracked file
+./scripts/run-jmeter-testplan.sh --plan specs/jmeter/TestPlan.jmx --proxy both
+
+# Run only one service
+./scripts/run-jmeter-testplan.sh --proxy dotnet
+./scripts/run-jmeter-testplan.sh --proxy rust
+
+# Fully custom scale knobs
+./scripts/run-jmeter-testplan.sh --proxy both \
+  --threads 20000 \
+  --ramp-seconds 45 \
+  --loops 12 \
+  --connect-timeout-ms 120000 \
+  --response-timeout-ms 120000
+```
+
+What it does:
+- Regenerates certs unless `--skip-certs` is passed.
+- Starts selected proxy implementation(s) on the mTLS endpoint.
+- Runs `specs/jmeter/TestPlan.jmx` (git-managed copy of the reference plan) in non-GUI mode with client cert + truststore config.
+- Applies runtime scale overrides (threads/ramp/loops/timeouts) when passed to the script.
+- Validates the generated JTL to require zero failed samples/assertions.
+- Writes logs/results to `.run-logs/jmeter/`.
 
 Latest tested Docker quick-run summary (`--quick --proxy both`, local machine):
 

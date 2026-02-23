@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 
 namespace LiteGateway.LoadClient;
@@ -43,7 +44,14 @@ internal static class Program
                 return 0;
             }
 
-            await RunAsync(options);
+            var runResult = await RunAsync(options);
+            if (options.FailOnErrors && runResult.Errors > 0)
+            {
+                Console.Error.WriteLine(
+                    $"Run failed assertions/errors: failed={runResult.Errors}, assertion_failed={runResult.AssertionFailures}");
+                return 1;
+            }
+
             return 0;
         }
         catch (Exception ex)
@@ -66,6 +74,7 @@ internal static class Program
             : X509CertificateLoader.LoadCertificateFromFile(options.CustomCaPath);
 
         var metrics = new Metrics();
+        var correlationSequence = new CorrelationSequence(options.CorrelationCounterStart);
         using var httpClient = CreateHttpClient(options, clientCertificate, trustedCaCertificate, metrics);
         using var durationCts = new CancellationTokenSource(options.Duration);
         LoadClientTui? tui = null;
@@ -88,7 +97,12 @@ internal static class Program
                 displayTask = DisplayLoopAsync(options, metrics, stopwatch, tui, durationCts.Token);
             }
 
-            var workers = await StartWorkersAsync(httpClient, options, metrics, durationCts.Token).ConfigureAwait(false);
+            var workers = await StartWorkersAsync(
+                httpClient,
+                options,
+                metrics,
+                correlationSequence,
+                durationCts.Token).ConfigureAwait(false);
             await Task.WhenAll(workers);
             durationCts.Cancel();
             if (displayTask is not null)
@@ -101,7 +115,7 @@ internal static class Program
             {
                 var prefix = string.IsNullOrWhiteSpace(runLabel) ? "run" : runLabel;
                 Console.WriteLine(
-                    $"{prefix}: success={finalSnapshot.Successes} failed={finalSnapshot.Errors} total={finalSnapshot.TotalRequests} " +
+                    $"{prefix}: success={finalSnapshot.Successes} failed={finalSnapshot.Errors} assertion_failed={finalSnapshot.AssertionFailures} total={finalSnapshot.TotalRequests} " +
                     $"error_pct={ComputeErrorPercentage(finalSnapshot):F2}% success_rps={ComputeSuccessRps(finalSnapshot):F2}");
             }
 
@@ -118,7 +132,8 @@ internal static class Program
                 ComputeSuccessRps(finalSnapshot),
                 finalSnapshot.Rps,
                 finalSnapshot.AvgLatencyMs,
-                finalSnapshot.P95Ms);
+                finalSnapshot.P95Ms,
+                finalSnapshot.AssertionFailures);
         }
         finally
         {
@@ -130,6 +145,7 @@ internal static class Program
     private static async Task RunMatrixAsync(LoadClientOptions baseOptions)
     {
         Console.WriteLine("Running matrix autotune (http/https/mtls x reuse/no-reuse)...");
+        Func<LoadClientOptions, MatrixScenario, int, LoadClientOptions> configureRun = ConfigureMatrixRun;
         var scenarios = new[]
         {
             new MatrixScenario("http-reuse", baseOptions.MatrixHttpUrl, HttpVersion.Version11, ReuseConnections: true, RequiresMtls: false),
@@ -150,7 +166,7 @@ internal static class Program
                 continue;
             }
 
-            var result = await RunAutotuneScenarioAsync(baseOptions, scenario).ConfigureAwait(false);
+            var result = await RunAutotuneScenarioAsync(baseOptions, scenario, configureRun).ConfigureAwait(false);
             results.Add(result);
         }
 
@@ -161,6 +177,7 @@ internal static class Program
         HttpClient httpClient,
         LoadClientOptions options,
         Metrics metrics,
+        CorrelationSequence correlationSequence,
         CancellationToken cancellationToken)
     {
         var workers = new List<Task>(options.Concurrency);
@@ -174,7 +191,7 @@ internal static class Program
             var stepCount = Math.Min(workersPerStep, options.Concurrency - workers.Count);
             for (var index = 0; index < stepCount; index++)
             {
-                workers.Add(WorkerLoopAsync(httpClient, options, metrics, cancellationToken));
+                workers.Add(WorkerLoopAsync(httpClient, options, metrics, correlationSequence, cancellationToken));
             }
 
             if (workers.Count >= options.Concurrency || workersPerStep >= options.Concurrency)
@@ -195,7 +212,10 @@ internal static class Program
         return workers.ToArray();
     }
 
-    private static async Task<MatrixScenarioResult> RunAutotuneScenarioAsync(LoadClientOptions baseOptions, MatrixScenario scenario)
+    private static async Task<MatrixScenarioResult> RunAutotuneScenarioAsync(
+        LoadClientOptions baseOptions,
+        MatrixScenario scenario,
+        Func<LoadClientOptions, MatrixScenario, int, LoadClientOptions> configureRun)
     {
         var attempts = new Dictionary<int, LoadRunResult>();
         var bestRun = default(LoadRunResult?);
@@ -205,7 +225,7 @@ internal static class Program
         var concurrency = baseOptions.AutotuneMinConcurrency;
         while (concurrency <= baseOptions.AutotuneMaxConcurrency)
         {
-            var run = await RunScenarioOnceAsync(baseOptions, scenario, concurrency).ConfigureAwait(false);
+            var run = await RunScenarioOnceAsync(baseOptions, scenario, concurrency, configureRun).ConfigureAwait(false);
             attempts[concurrency] = run;
             if (IsHealthy(run, baseOptions.AutotuneMaxErrorPercent))
             {
@@ -247,7 +267,7 @@ internal static class Program
                     break;
                 }
 
-                var run = await RunScenarioOnceAsync(baseOptions, scenario, mid).ConfigureAwait(false);
+                var run = await RunScenarioOnceAsync(baseOptions, scenario, mid, configureRun).ConfigureAwait(false);
                 attempts[mid] = run;
 
                 if (IsHealthy(run, baseOptions.AutotuneMaxErrorPercent))
@@ -281,18 +301,28 @@ internal static class Program
             bestRun.Value.P95Ms);
     }
 
-    private static async Task<LoadRunResult> RunScenarioOnceAsync(LoadClientOptions baseOptions, MatrixScenario scenario, int concurrency)
+    private static async Task<LoadRunResult> RunScenarioOnceAsync(
+        LoadClientOptions baseOptions,
+        MatrixScenario scenario,
+        int concurrency,
+        Func<LoadClientOptions, MatrixScenario, int, LoadClientOptions> configureRun)
     {
-        var scenarioOptions = baseOptions.With(
+        var scenarioOptions = configureRun(baseOptions, scenario, concurrency);
+
+        var label = $"{scenario.Name} c={concurrency}";
+        return await RunAsync(scenarioOptions, runLabel: label, showLiveUi: false).ConfigureAwait(false);
+    }
+
+    private static LoadClientOptions ConfigureMatrixRun(LoadClientOptions baseOptions, MatrixScenario scenario, int concurrency)
+    {
+        return baseOptions.With(
             targetUri: scenario.Url,
             concurrency: concurrency,
             duration: baseOptions.MatrixRunDuration,
             connectionClose: !scenario.ReuseConnections,
             httpVersion: scenario.RequestHttpVersion,
-            mode: LoadClientMode.Single);
-
-        var label = $"{scenario.Name} c={concurrency}";
-        return await RunAsync(scenarioOptions, runLabel: label, showLiveUi: false).ConfigureAwait(false);
+            mode: LoadClientMode.Single,
+            loopsPerWorker: 0);
     }
 
     private static bool IsHealthy(LoadRunResult run, double maxErrorPercent) =>
@@ -422,20 +452,31 @@ internal static class Program
         HttpClient httpClient,
         LoadClientOptions options,
         Metrics metrics,
+        CorrelationSequence correlationSequence,
         CancellationToken cancellationToken)
     {
-        while (!cancellationToken.IsCancellationRequested)
+        long completedIterations = 0;
+        while (!cancellationToken.IsCancellationRequested &&
+               (options.LoopsPerWorker <= 0 || completedIterations < options.LoopsPerWorker))
         {
+            completedIterations++;
             var started = Stopwatch.GetTimestamp();
             metrics.IncrementInflight();
 
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Get, options.TargetUri)
+                var counter = correlationSequence.Next();
+                var correlationId = $"{options.CorrelationPrefix}{counter.ToString(CultureInfo.InvariantCulture)}";
+                var targetUri = BuildRequestUri(options.TargetUri, options.CorrelationQueryParameter, correlationId);
+                var requestBody = BuildRequestBody(options.RequestBodyTemplate, correlationId, counter);
+
+                using var request = new HttpRequestMessage(HttpMethod.Post, targetUri)
                 {
                     Version = options.HttpVersion,
-                    VersionPolicy = HttpVersionPolicy.RequestVersionExact
+                    VersionPolicy = HttpVersionPolicy.RequestVersionExact,
+                    Content = new StringContent(requestBody, Encoding.UTF8, "application/json")
                 };
+                request.Headers.Accept.ParseAdd("*/*");
 
                 if (options.ConnectionClose && options.HttpVersion == System.Net.HttpVersion.Version11)
                 {
@@ -450,14 +491,26 @@ internal static class Program
                     HttpCompletionOption.ResponseHeadersRead,
                     requestTimeoutCts.Token).ConfigureAwait(false);
 
-                if (response.Content is not null)
+                var responseText = response.Content is null
+                    ? string.Empty
+                    : await response.Content.ReadAsStringAsync(requestTimeoutCts.Token).ConfigureAwait(false);
+                var statusPassed = options.ExpectedStatusCode <= 0
+                    ? response.IsSuccessStatusCode
+                    : (int)response.StatusCode == options.ExpectedStatusCode;
+                var correlationPassed = TryExtractJsonPathValue(
+                    responseText,
+                    options.CorrelationJsonPath,
+                    out var extractedValue) &&
+                    string.Equals(extractedValue, correlationId, StringComparison.Ordinal);
+                var assertionsPassed = statusPassed && correlationPassed;
+                if (!assertionsPassed)
                 {
-                    await response.Content.CopyToAsync(Stream.Null, requestTimeoutCts.Token).ConfigureAwait(false);
+                    metrics.RecordAssertionFailure();
                 }
 
                 var elapsedTicks = Stopwatch.GetTimestamp() - started;
                 var withinMaxRequestTime = elapsedTicks <= options.MaxRequestTimeStopwatchTicks;
-                metrics.RecordRequest(elapsedTicks, response.IsSuccessStatusCode && withinMaxRequestTime);
+                metrics.RecordRequest(elapsedTicks, assertionsPassed && withinMaxRequestTime);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -475,6 +528,65 @@ internal static class Program
             {
                 metrics.DecrementInflight();
             }
+        }
+    }
+
+    private static Uri BuildRequestUri(Uri baseUri, string queryParameterName, string correlationId)
+    {
+        var uriBuilder = new UriBuilder(baseUri);
+        var encodedPair = $"{Uri.EscapeDataString(queryParameterName)}={Uri.EscapeDataString(correlationId)}";
+        var existingQuery = uriBuilder.Query;
+        uriBuilder.Query = string.IsNullOrWhiteSpace(existingQuery)
+            ? encodedPair
+            : $"{existingQuery.TrimStart('?')}&{encodedPair}";
+        return uriBuilder.Uri;
+    }
+
+    private static string BuildRequestBody(string template, string correlationId, long counter)
+    {
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        return template
+            .Replace("{{correlationId}}", correlationId, StringComparison.Ordinal)
+            .Replace("{{counter}}", counter.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal)
+            .Replace("{{timestamp}}", timestamp, StringComparison.Ordinal);
+    }
+
+    private static bool TryExtractJsonPathValue(string jsonPayload, string jsonPath, out string value)
+    {
+        value = string.Empty;
+        if (string.IsNullOrWhiteSpace(jsonPayload) ||
+            string.IsNullOrWhiteSpace(jsonPath) ||
+            !jsonPath.StartsWith("$.", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var pathSegments = jsonPath[2..].Split('.', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (pathSegments.Length == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var jsonDocument = JsonDocument.Parse(jsonPayload);
+            var current = jsonDocument.RootElement;
+            foreach (var segment in pathSegments)
+            {
+                if (current.ValueKind != JsonValueKind.Object || !current.TryGetProperty(segment, out current))
+                {
+                    return false;
+                }
+            }
+
+            value = current.ValueKind == JsonValueKind.String
+                ? current.GetString() ?? string.Empty
+                : current.ToString();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 
@@ -547,25 +659,34 @@ internal static class Program
         Console.WriteLine("  --cert-pfx <path>                  Client PFX path (env: LITEGATEWAY_LOADCLIENT_CERT_PFX)");
         Console.WriteLine("  --cert-password <value>            Client PFX password (env: LITEGATEWAY_LOADCLIENT_CERT_PASSWORD)");
         Console.WriteLine("  --custom-ca <path>                 Optional custom CA cert (env: LITEGATEWAY_LOADCLIENT_CUSTOM_CA)");
-        Console.WriteLine("  --concurrency <int>                Workers, default 64 (env: LITEGATEWAY_LOADCLIENT_CONCURRENCY)");
+        Console.WriteLine("  --concurrency <int>                Workers, default 1500 single / 64 matrix (env: LITEGATEWAY_LOADCLIENT_CONCURRENCY)");
         Console.WriteLine("  --duration <seconds|hh:mm:ss>      Test duration, default 60s (env: LITEGATEWAY_LOADCLIENT_DURATION)");
-        Console.WriteLine("  --timeout <seconds|hh:mm:ss>       Request timeout, default 30s (env: LITEGATEWAY_LOADCLIENT_TIMEOUT)");
-        Console.WriteLine("  --max-request-time <seconds|hh:mm:ss>  Mark request as error after this time, default 10s (env: LITEGATEWAY_LOADCLIENT_MAX_REQUEST_TIME)");
-        Console.WriteLine("  --ramp-percent-per-second <0-100>  Add this % of target workers each second, default 10 (env: LITEGATEWAY_LOADCLIENT_RAMP_PERCENT_PER_SECOND)");
+        Console.WriteLine("  --timeout <seconds|hh:mm:ss>       Request timeout, default 60s (env: LITEGATEWAY_LOADCLIENT_TIMEOUT)");
+        Console.WriteLine("  --max-request-time <seconds|hh:mm:ss>  Mark request as error after this time, default 60s (env: LITEGATEWAY_LOADCLIENT_MAX_REQUEST_TIME)");
+        Console.WriteLine("  --ramp-seconds <int>               Ramp all workers over this many seconds (default 5)");
+        Console.WriteLine("  --ramp-percent-per-second <0-100>  Override ramp directly as % workers per second");
         Console.WriteLine("  --refresh-interval <seconds|hh:mm:ss>  UI refresh, default 1s (env: LITEGATEWAY_LOADCLIENT_REFRESH_INTERVAL)");
-        Console.WriteLine("  --http-version <1.1|2|3>           HTTP version, default 2 (env: LITEGATEWAY_LOADCLIENT_HTTP_VERSION)");
+        Console.WriteLine("  --http-version <1.1|2|3>           HTTP version, default 1.1 (env: LITEGATEWAY_LOADCLIENT_HTTP_VERSION)");
         Console.WriteLine("  --connection-close                 Send Connection: close (requires --http-version 1.1)");
         Console.WriteLine("  --profile <balanced|reuse-first>   HTTP handler profile (default: reuse-first)");
         Console.WriteLine("  --track-opened-connections <bool>  Track opened TCP sockets via ConnectCallback (default: false)");
-        Console.WriteLine("  --matrix-http-url <http-url>       Matrix HTTP endpoint (default: http://localhost:8080/)");
-        Console.WriteLine("  --matrix-https-url <https-url>     Matrix HTTPS endpoint (default: https://localhost:8443/)");
-        Console.WriteLine("  --matrix-mtls-url <https-url>      Matrix mTLS endpoint (default: https://localhost:9443/)");
+        Console.WriteLine("  --matrix-http-url <http-url>       Matrix HTTP endpoint (default: http://localhost:8080/api/test)");
+        Console.WriteLine("  --matrix-https-url <https-url>     Matrix HTTPS endpoint (default: https://localhost:8443/api/test)");
+        Console.WriteLine("  --matrix-mtls-url <https-url>      Matrix mTLS endpoint (default: https://localhost:9443/api/test)");
         Console.WriteLine("  --matrix-run-duration <sec|hh:mm:ss>  Duration per matrix attempt (default: 20s)");
         Console.WriteLine("  --autotune-min-concurrency <int>   Matrix autotune min concurrency (default: 256)");
         Console.WriteLine("  --autotune-max-concurrency <int>   Matrix autotune max concurrency (default: 8192)");
         Console.WriteLine("  --autotune-growth-factor <double>  Matrix autotune growth factor (default: 2.0)");
         Console.WriteLine("  --autotune-max-error-pct <double>  Max error % for healthy run (default: 2.0)");
         Console.WriteLine("  --autotune-binary-steps <int>      Binary search steps after first failure (default: 5)");
+        Console.WriteLine("  --fail-on-errors <bool>            Exit non-zero when failed requests exist (default: true)");
+        Console.WriteLine("  --loops-per-worker <int>           Fixed requests per worker (default: 5)");
+        Console.WriteLine("  --assert-status-code <int>         Expected status code assertion (default: 200)");
+        Console.WriteLine("  --assert-json-path <path>          JSON path assertion against response body (default: $.correlationId)");
+        Console.WriteLine("  --correlation-prefix <value>       Correlation prefix token (default: 5ac318d4-5e88-4b37-8ed1-)");
+        Console.WriteLine("  --correlation-start <long>         Correlation start counter (default: 30000000)");
+        Console.WriteLine("  --correlation-query-param <name>   Query parameter carrying correlation id (default: correlationId)");
+        Console.WriteLine("  --request-body-template <json>     Request body template; supports {{correlationId}}, {{counter}}, {{timestamp}}");
         Console.WriteLine("  live TUI                           Auto-enabled on interactive terminal (RPS/p95 graphs + histogram)");
         Console.WriteLine("  --help                             Show this help");
     }
@@ -598,6 +719,14 @@ internal sealed class LoadClientOptions
     public required double AutotuneGrowthFactor { get; init; }
     public required double AutotuneMaxErrorPercent { get; init; }
     public required int AutotuneBinarySearchSteps { get; init; }
+    public required bool FailOnErrors { get; init; }
+    public required int LoopsPerWorker { get; init; }
+    public required int ExpectedStatusCode { get; init; }
+    public required string CorrelationJsonPath { get; init; }
+    public required string CorrelationPrefix { get; init; }
+    public required long CorrelationCounterStart { get; init; }
+    public required string CorrelationQueryParameter { get; init; }
+    public required string RequestBodyTemplate { get; init; }
 
     public static LoadClientOptions Parse(string[] args)
     {
@@ -605,7 +734,7 @@ internal sealed class LoadClientOptions
         var mode = ParseMode(ReadOptional(args, "--mode", "MODE"), hasTargetUrl: !string.IsNullOrWhiteSpace(targetUrlRaw));
         var targetUri = mode == LoadClientMode.Single
             ? ParseEndpointUri(targetUrlRaw, "--url", requireHttps: false)
-            : ParseEndpointUri(ReadOptional(args, "--matrix-https-url", "MATRIX_HTTPS_URL") ?? "https://localhost:8443/", "--matrix-https-url", requireHttps: true);
+            : ParseEndpointUri(ReadOptional(args, "--matrix-https-url", "MATRIX_HTTPS_URL") ?? "https://localhost:8443/api/test", "--matrix-https-url", requireHttps: true);
 
         var clientCertificatePathRaw = ReadOptional(args, "--cert-pfx", "CERT_PFX") ??
                                        Environment.GetEnvironmentVariable("CLIENT_PFX");
@@ -626,28 +755,40 @@ internal sealed class LoadClientOptions
         var trackOpenedConnections = ParseBool(
             ReadOptional(args, "--track-opened-connections", "TRACK_OPENED_CONNECTIONS"),
             fallback: false);
-        var concurrency = ParseInt(ReadOptional(args, "--concurrency", "CONCURRENCY"), 64, 1, 1_000_000, "--concurrency");
-        var duration = ParseTimeSpan(ReadOptional(args, "--duration", "DURATION"), TimeSpan.FromSeconds(60), "--duration");
-        var timeout = ParseTimeSpan(ReadOptional(args, "--timeout", "TIMEOUT"), TimeSpan.FromSeconds(30), "--timeout");
+        const int defaultConcurrency = 1500;
+        var durationDefault = TimeSpan.FromSeconds(60);
+        var timeoutDefault = TimeSpan.FromSeconds(60);
+        var maxRequestTimeDefault = TimeSpan.FromSeconds(60);
+        var concurrencyDefault = mode == LoadClientMode.Matrix ? 64 : defaultConcurrency;
+        var concurrency = ParseInt(ReadOptional(args, "--concurrency", "CONCURRENCY"), concurrencyDefault, 1, 1_000_000, "--concurrency");
+        var duration = ParseTimeSpan(ReadOptional(args, "--duration", "DURATION"), durationDefault, "--duration");
+        var timeout = ParseTimeSpan(ReadOptional(args, "--timeout", "TIMEOUT"), timeoutDefault, "--timeout");
         var maxRequestTime = ParseTimeSpan(
             ReadOptional(args, "--max-request-time", "MAX_REQUEST_TIME"),
-            TimeSpan.FromSeconds(10),
+            maxRequestTimeDefault,
             "--max-request-time");
-        var rampPercentPerSecond = ParsePercent(
-            ReadOptional(args, "--ramp-percent-per-second", "RAMP_PERCENT_PER_SECOND"),
-            10,
-            "--ramp-percent-per-second");
+        var rampPercentRaw = ReadOptional(args, "--ramp-percent-per-second", "RAMP_PERCENT_PER_SECOND");
+        var rampSecondsDefault = 5;
+        var rampSeconds = ParseInt(
+            ReadOptional(args, "--ramp-seconds", "RAMP_SECONDS"),
+            rampSecondsDefault,
+            1,
+            3600,
+            "--ramp-seconds");
+        var rampPercentPerSecond = !string.IsNullOrWhiteSpace(rampPercentRaw)
+            ? ParsePercent(rampPercentRaw, 10, "--ramp-percent-per-second")
+            : Math.Clamp(100d / rampSeconds, 0.1d, 100d);
         var matrixHttpUrl = ParseEndpointUri(
-            ReadOptional(args, "--matrix-http-url", "MATRIX_HTTP_URL") ?? "http://localhost:8080/",
+            ReadOptional(args, "--matrix-http-url", "MATRIX_HTTP_URL") ?? "http://localhost:8080/api/test",
             "--matrix-http-url",
             requireHttps: false,
             allowedScheme: Uri.UriSchemeHttp);
         var matrixHttpsUrl = ParseEndpointUri(
-            ReadOptional(args, "--matrix-https-url", "MATRIX_HTTPS_URL") ?? "https://localhost:8443/",
+            ReadOptional(args, "--matrix-https-url", "MATRIX_HTTPS_URL") ?? "https://localhost:8443/api/test",
             "--matrix-https-url",
             requireHttps: true);
         var matrixMtlsUrl = ParseEndpointUri(
-            ReadOptional(args, "--matrix-mtls-url", "MATRIX_MTLS_URL") ?? "https://localhost:9443/",
+            ReadOptional(args, "--matrix-mtls-url", "MATRIX_MTLS_URL") ?? "https://localhost:9443/api/test",
             "--matrix-mtls-url",
             requireHttps: true);
         var matrixRunDuration = ParseTimeSpan(
@@ -688,12 +829,89 @@ internal sealed class LoadClientOptions
             ReadOptional(args, "--refresh-interval", "REFRESH_INTERVAL"),
             TimeSpan.FromSeconds(1),
             "--refresh-interval");
-        var httpVersion = ParseHttpVersion(ReadOptional(args, "--http-version", "HTTP_VERSION"));
+        var httpVersionDefault = "1.1";
+        var httpVersion = ParseHttpVersion(ReadOptional(args, "--http-version", "HTTP_VERSION"), httpVersionDefault);
         var connectionClose = ParseConnectionClose(args);
         if (connectionClose && httpVersion != System.Net.HttpVersion.Version11)
         {
             throw new InvalidOperationException("--connection-close requires --http-version 1.1.");
         }
+
+        var loopsPerWorker = ParseInt(
+            ReadOptional(args, "--loops-per-worker", "LOOPS_PER_WORKER"),
+            5,
+            0,
+            1_000_000,
+            "--loops-per-worker");
+        var expectedStatusCode = ParseInt(
+            ReadOptional(args, "--assert-status-code", "ASSERT_STATUS_CODE"),
+            200,
+            0,
+            999,
+            "--assert-status-code");
+        var correlationJsonPath = ReadOptional(args, "--assert-json-path", "ASSERT_JSON_PATH") ?? "$.correlationId";
+        var correlationPrefix = ReadOptional(args, "--correlation-prefix", "CORRELATION_PREFIX") ?? "5ac318d4-5e88-4b37-8ed1-";
+        var correlationCounterStart = ParseLong(
+            ReadOptional(args, "--correlation-start", "CORRELATION_START"),
+            30_000_000,
+            0,
+            long.MaxValue,
+            "--correlation-start");
+        var correlationQueryParameter = ReadOptional(args, "--correlation-query-param", "CORRELATION_QUERY_PARAM") ?? "correlationId";
+        var requestBodyTemplate = ReadOptional(args, "--request-body-template", "REQUEST_BODY_TEMPLATE")
+                                     ?? """
+                                        {
+                                            "id": "a16661e7-41da-49d1-aee5-2dc1a591db2b",
+                                            "timestamp": "{{timestamp}}",
+                                            "status": "processing",
+                                            "user": {
+                                                "userId": "user-123",
+                                                "username": "data_processor",
+                                                "roles": [
+                                                    "admin",
+                                                    "editor"
+                                                ]
+                                            },
+                                            "config": {
+                                                "source": "source-system-a",
+                                                "destination": "destination-system-b",
+                                                "retries": 3,
+                                                "timeout": 60,
+                                                "notifications": {
+                                                    "on_success": "notify-team@example.com",
+                                                    "on_failure": "ops-alert@example.com"
+                                                }
+                                            },
+                                            "payload": {
+                                                "description": "This is a sample JSON object designed to be approximately 1 KB. It contains various data types and nested structures, padded with placeholder text. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.",
+                                                "items": [
+                                                    {
+                                                        "id": "item-001",
+                                                        "label": "First Item",
+                                                        "value": 123.45,
+                                                        "active": true
+                                                    },
+                                                    {
+                                                        "id": "item-002",
+                                                        "label": "Second Item",
+                                                        "value": 678.9,
+                                                        "active": false
+                                                    },
+                                                    {
+                                                        "id": "item-003",
+                                                        "label": "Third Item",
+                                                        "value": 101.11,
+                                                        "active": true
+                                                    }
+                                                ],
+                                                "checksum": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+                                            },
+                                            "correlationId": "{{correlationId}}"
+                                        }
+                                        """;
+        var failOnErrors = ParseBool(
+            ReadOptional(args, "--fail-on-errors", "FAIL_ON_ERRORS"),
+            fallback: true);
 
         return new LoadClientOptions
         {
@@ -721,7 +939,15 @@ internal sealed class LoadClientOptions
             AutotuneMaxConcurrency = autotuneMaxConcurrency,
             AutotuneGrowthFactor = autotuneGrowthFactor,
             AutotuneMaxErrorPercent = autotuneMaxErrorPercent,
-            AutotuneBinarySearchSteps = autotuneBinarySearchSteps
+            AutotuneBinarySearchSteps = autotuneBinarySearchSteps,
+            FailOnErrors = failOnErrors,
+            LoopsPerWorker = loopsPerWorker,
+            ExpectedStatusCode = expectedStatusCode,
+            CorrelationJsonPath = correlationJsonPath,
+            CorrelationPrefix = correlationPrefix,
+            CorrelationCounterStart = correlationCounterStart,
+            CorrelationQueryParameter = correlationQueryParameter,
+            RequestBodyTemplate = requestBodyTemplate
         };
     }
 
@@ -755,9 +981,9 @@ internal sealed class LoadClientOptions
         return ParseBool(fromEnvironment, fallback: false);
     }
 
-    private static Version ParseHttpVersion(string? rawValue)
+    private static Version ParseHttpVersion(string? rawValue, string fallbackVersion)
     {
-        var value = string.IsNullOrWhiteSpace(rawValue) ? "2" : rawValue.Trim();
+        var value = string.IsNullOrWhiteSpace(rawValue) ? fallbackVersion : rawValue.Trim();
         return value switch
         {
             "1" or "1.1" => System.Net.HttpVersion.Version11,
@@ -917,6 +1143,21 @@ internal sealed class LoadClientOptions
         throw new InvalidOperationException($"{settingName} must be between {min} and {max}.");
     }
 
+    private static long ParseLong(string? rawValue, long fallback, long min, long max, string settingName)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            return fallback;
+        }
+
+        if (long.TryParse(rawValue, out var parsedValue) && parsedValue >= min && parsedValue <= max)
+        {
+            return parsedValue;
+        }
+
+        throw new InvalidOperationException($"{settingName} must be between {min} and {max}.");
+    }
+
     private static bool ParseBool(string? rawValue, bool fallback)
     {
         if (string.IsNullOrWhiteSpace(rawValue))
@@ -1016,7 +1257,8 @@ internal sealed class LoadClientOptions
         bool? connectionClose = null,
         LoadClientMode? mode = null,
         LoadClientProfile? profile = null,
-        Version? httpVersion = null)
+        Version? httpVersion = null,
+        int? loopsPerWorker = null)
     {
         return new LoadClientOptions
         {
@@ -1044,7 +1286,15 @@ internal sealed class LoadClientOptions
             AutotuneMaxConcurrency = AutotuneMaxConcurrency,
             AutotuneGrowthFactor = AutotuneGrowthFactor,
             AutotuneMaxErrorPercent = AutotuneMaxErrorPercent,
-            AutotuneBinarySearchSteps = AutotuneBinarySearchSteps
+            AutotuneBinarySearchSteps = AutotuneBinarySearchSteps,
+            FailOnErrors = FailOnErrors,
+            LoopsPerWorker = loopsPerWorker ?? LoopsPerWorker,
+            ExpectedStatusCode = ExpectedStatusCode,
+            CorrelationJsonPath = CorrelationJsonPath,
+            CorrelationPrefix = CorrelationPrefix,
+            CorrelationCounterStart = CorrelationCounterStart,
+            CorrelationQueryParameter = CorrelationQueryParameter,
+            RequestBodyTemplate = RequestBodyTemplate
         };
     }
 }
@@ -1056,6 +1306,7 @@ internal sealed class Metrics
     private long _totalRequests;
     private long _successfulRequests;
     private long _failedRequests;
+    private long _assertionFailures;
     private long _totalLatencyTicks;
     private readonly LatencyHistogram _histogram = new();
 
@@ -1064,6 +1315,8 @@ internal sealed class Metrics
     public void DecrementInflight() => Interlocked.Decrement(ref _inflight);
 
     public void RecordOpenedConnection() => Interlocked.Increment(ref _openedConnections);
+
+    public void RecordAssertionFailure() => Interlocked.Increment(ref _assertionFailures);
 
     public void RecordRequest(long latencyTicks, bool isSuccess)
     {
@@ -1093,13 +1346,14 @@ internal sealed class Metrics
         return new MetricsSnapshot(
             elapsed,
             Volatile.Read(ref _inflight),
-            Volatile.Read(ref _openedConnections),
-            totalRequests,
-            Volatile.Read(ref _successfulRequests),
-            Volatile.Read(ref _failedRequests),
-            rps,
-            averageLatencyMs,
-            _histogram.PercentileMilliseconds(0.50),
+                Volatile.Read(ref _openedConnections),
+                totalRequests,
+                Volatile.Read(ref _successfulRequests),
+                Volatile.Read(ref _failedRequests),
+                Volatile.Read(ref _assertionFailures),
+                rps,
+                averageLatencyMs,
+                _histogram.PercentileMilliseconds(0.50),
             _histogram.PercentileMilliseconds(0.95),
             _histogram.PercentileMilliseconds(0.99));
     }
@@ -1234,6 +1488,7 @@ internal readonly record struct MetricsSnapshot(
     long TotalRequests,
     long Successes,
     long Errors,
+    long AssertionFailures,
     double Rps,
     double AvgLatencyMs,
     double P50Ms,
@@ -1262,7 +1517,8 @@ internal readonly record struct LoadRunResult(
     double SuccessRps,
     double TotalRps,
     double AvgLatencyMs,
-    double P95Ms);
+    double P95Ms,
+    long AssertionFailures);
 
 internal readonly record struct MatrixScenario(
     string Name,
@@ -1309,6 +1565,18 @@ internal enum LoadClientProfile
 {
     Balanced,
     ReuseFirst
+}
+
+internal sealed class CorrelationSequence
+{
+    private long _value;
+
+    public CorrelationSequence(long start)
+    {
+        _value = start - 1;
+    }
+
+    public long Next() => Interlocked.Increment(ref _value);
 }
 
 internal sealed class LoadClientTui : IDisposable
@@ -1483,7 +1751,7 @@ internal sealed class LoadClientTui : IDisposable
     {
         var total = snapshot.TotalRequests;
         var errorPercentage = total <= 0 ? 0d : (snapshot.Errors * 100d) / total;
-        return $"summary success={snapshot.Successes} failed={snapshot.Errors} error_pct={errorPercentage:F2}% total={total}";
+        return $"summary success={snapshot.Successes} failed={snapshot.Errors} assertion_failed={snapshot.AssertionFailures} error_pct={errorPercentage:F2}% total={total}";
     }
 
     private static int GetTerminalWidth()

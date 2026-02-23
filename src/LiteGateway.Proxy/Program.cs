@@ -84,36 +84,59 @@ await app.RunAsync();
 
 static async Task HandleAsync(HttpContext context, ProxyRuntime runtime)
 {
+    if (runtime.UpstreamUri is null)
+    {
+        ReadOnlyMemory<byte> requestBody;
+        try
+        {
+            requestBody = await ReadRequestBodyAsync(context.Request, context.RequestAborted);
+            await Task.Delay(runtime.SleepDuration, context.RequestAborted);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        await WriteStandaloneResponseAsync(context, runtime, requestBody);
+        return;
+    }
+
     try
     {
         await Task.Delay(runtime.SleepDuration, context.RequestAborted);
+        await ForwardAsync(context, runtime);
     }
     catch (OperationCanceledException)
     {
-        return;
     }
-
-    if (runtime.UpstreamUri is null)
-    {
-        await WriteStandaloneResponseAsync(context, runtime);
-        return;
-    }
-
-    await ForwardAsync(context, runtime);
 }
 
-static async Task WriteStandaloneResponseAsync(HttpContext context, ProxyRuntime runtime)
+static async Task<ReadOnlyMemory<byte>> ReadRequestBodyAsync(HttpRequest request, CancellationToken cancellationToken)
+{
+    if (request.Body is null)
+    {
+        return ReadOnlyMemory<byte>.Empty;
+    }
+
+    using var buffer = new MemoryStream();
+    await request.Body.CopyToAsync(buffer, cancellationToken);
+    return buffer.ToArray();
+}
+
+static async Task WriteStandaloneResponseAsync(HttpContext context, ProxyRuntime runtime, ReadOnlyMemory<byte> requestBody)
 {
     context.Response.StatusCode = StatusCodes.Status200OK;
-    context.Response.ContentType = "application/json";
-    context.Response.ContentLength = runtime.StandaloneBody.Length;
+    context.Response.ContentType = string.IsNullOrWhiteSpace(context.Request.ContentType)
+        ? "application/json"
+        : context.Request.ContentType;
+    context.Response.ContentLength = requestBody.Length;
 
     if (runtime.PassConnectionClose && IsConnectionCloseRequested(context.Request.Headers))
     {
         context.Response.Headers.Connection = "close";
     }
 
-    await context.Response.BodyWriter.WriteAsync(runtime.StandaloneBody, context.RequestAborted);
+    await context.Response.BodyWriter.WriteAsync(requestBody, context.RequestAborted);
 }
 
 static async Task ForwardAsync(HttpContext context, ProxyRuntime runtime)
@@ -494,7 +517,6 @@ file static class CertificateValidationCache
 
 file sealed class ProxyRuntime : IDisposable
 {
-    private static readonly byte[] StandalonePayloadBytes = """{"status":"ok","mode":"standalone"}"""u8.ToArray();
     private readonly SocketsHttpHandler _httpHandler;
     private readonly X509Certificate2? _outboundClientCertificate;
 
@@ -518,7 +540,6 @@ file sealed class ProxyRuntime : IDisposable
     public Uri? UpstreamUri { get; }
     public bool PassConnectionClose { get; }
     public HttpMessageInvoker HttpInvoker { get; }
-    public ReadOnlyMemory<byte> StandaloneBody => StandalonePayloadBytes;
 
     public static ProxyRuntime Create(ProxySettings settings)
     {
