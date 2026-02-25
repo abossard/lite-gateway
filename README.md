@@ -120,21 +120,7 @@ Full matrix usually completes in 12–22 min with defaults.
 ## Benchmark Results
 
 All numbers are **successful requests per second (RPS)** — higher is better.
-
-### Docker quick-run (`--quick --proxy both`)
-
-Short 8 s runs with default 5 s proxy delay, so absolute RPS is low; useful for comparative ranking.
-
-| Scenario | .NET (RPS) | Rust (RPS) |
-| --- | ---: | ---: |
-| http-reuse | 19.43 | 20.90 |
-| http-no-reuse | 19.42 | 19.42 |
-| https-reuse | 25.91 | 24.91 |
-| https-no-reuse | 19.87 | 19.41 |
-| https-mtls-reuse | 20.56 | 20.03 |
-| https-mtls-no-reuse | 19.40 | 19.41 |
-
-### Local native full run (Release AOT, same machine)
+Results from a local native full run (Release AOT, same machine):
 
 | Scenario | .NET (RPS) | Rust (RPS) |
 | --- | ---: | ---: |
