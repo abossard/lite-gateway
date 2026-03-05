@@ -66,7 +66,7 @@ jobs:
 
           # ── macOS ──────────────────────────────────────────────────────────
           - rid: osx-x64
-            os: macos-13          # last x64 macOS runner
+            os: macos-14          # cross-compile x64 on ARM64 runner
             artifact: LiteGateway.YarpProxy
             archive: tar
 
@@ -114,6 +114,17 @@ jobs:
             binutils-aarch64-linux-gnu \
             gcc-aarch64-linux-gnu \
             zlib1g-dev:arm64
+
+      # ── macOS: add Swift static library paths for AOT linker ───────────
+      - name: Setup Swift library paths (macOS)
+        if: startsWith(matrix.rid, 'osx')
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.2.app || true
+          XCODE_DEV="$(xcode-select -p)"
+          SWIFT_STATIC="${XCODE_DEV}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift_static/macosx"
+          SWIFT_LIB="${XCODE_DEV}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx"
+          echo "Adding Swift lib paths: ${SWIFT_STATIC} ${SWIFT_LIB}"
+          echo "LIBRARY_PATH=${SWIFT_STATIC}:${SWIFT_LIB}${LIBRARY_PATH:+:$LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       # ── Publish (restore + AOT compile in one step) ──────────────────────
       - name: Publish Native AOT
