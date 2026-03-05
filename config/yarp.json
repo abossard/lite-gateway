@@ -1,0 +1,24 @@
+{
+  "ReverseProxy": {
+    "Routes": {
+      "catch-all": {
+        "ClusterId": "upstream",
+        "Match": {
+          "Path": "{**catch-all}"
+        },
+        "Transforms": [
+          { "RequestHeader": "TEST-ID", "Set": "1234" }
+        ]
+      }
+    },
+    "Clusters": {
+      "upstream": {
+        "Destinations": {
+          "default": {
+            "Address": "http://backend:8080"
+          }
+        }
+      }
+    }
+  }
+}

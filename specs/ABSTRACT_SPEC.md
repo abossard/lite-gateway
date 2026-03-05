@@ -1,5 +1,9 @@
 # Lite Gateway Abstract Spec
 
+# Updates:
+- up to 6000 TPS
+- 3000+ connections
+
 ## 1) Purpose
 Lite Gateway (LGW) is a high-throughput edge reverse proxy between local instruments and Cloud Gateway (CGW), replacing the legacy IIS-based approach.
 

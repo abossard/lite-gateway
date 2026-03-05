@@ -1,0 +1,79 @@
+# =============================================================================
+# YARP Reverse Proxy — Docker Compose
+# =============================================================================
+# Demonstrates all three header injection approaches:
+#   1. Mounted config file  (/config/yarp.json)
+#   2. YARP native env vars (ReverseProxy__Routes__...)
+#   3. PROXY_HEADER_* env vars (entrypoint script)
+#
+# Usage:
+#   docker compose -f docker-compose.yarp.yml up --build
+#
+# The YARP proxy listens on host port 38080 and forwards to the .NET backend.
+# =============================================================================
+
+services:
+  # ── Backend (existing LiteGateway.Proxy in standalone/echo mode) ──────────
+  backend:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.Proxy/Dockerfile
+    environment:
+      LITEGATEWAY_Proxy__EnableHttp: "true"
+      LITEGATEWAY_Proxy__HttpPort: "8080"
+      LITEGATEWAY_Proxy__EnableHttps: "false"
+      LITEGATEWAY_Proxy__EnableMtls: "false"
+      LITEGATEWAY_Proxy__SleepDurationMs: "0"
+      LITEGATEWAY_Proxy__ServerCertificatePath: "/certs/generated/server.pfx"
+      LITEGATEWAY_Proxy__ServerCertificatePassword: "changeit"
+      LITEGATEWAY_Proxy__TrustedCaPath: "/certs/generated/ca.cert.pem"
+      LITEGATEWAY_Proxy__UpstreamUrl: ""
+    volumes:
+      - ./certs/generated:/certs/generated:ro
+
+  # ── YARP Proxy (approach 1: mounted config file) ─────────────────────────
+  yarp-proxy:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.YarpProxy/Dockerfile
+    volumes:
+      - ./config/yarp.json:/config/yarp.json:ro
+    ports:
+      - "38080:8080"
+    depends_on:
+      - backend
+
+  # ── YARP Proxy (approach 2: YARP native env vars) ────────────────────────
+  # Uncomment to use instead of the mounted config file approach.
+  #
+  # yarp-proxy-envvars:
+  #   build:
+  #     context: .
+  #     dockerfile: src/LiteGateway.YarpProxy/Dockerfile
+  #   environment:
+  #     ReverseProxy__Clusters__upstream__Destinations__default__Address: "http://backend:8080"
+  #     ReverseProxy__Routes__catch-all__Transforms__0__RequestHeader: "TEST-ID"
+  #     ReverseProxy__Routes__catch-all__Transforms__0__Set: "1234"
+  #   ports:
+  #     - "38081:8080"
+  #   depends_on:
+  #     - backend
+
+  # ── YARP Proxy (approach 3: PROXY_HEADER_* entrypoint script) ────────────
+  # Uncomment to use the entrypoint-based dynamic mapping.
+  # The external env var TEST_123_ID is mapped to PROXY_HEADER_TEST_ID.
+  #
+  # yarp-proxy-dynamic:
+  #   build:
+  #     context: .
+  #     dockerfile: src/LiteGateway.YarpProxy/Dockerfile
+  #   environment:
+  #     # Map the externally-provided env var to the standard PROXY_HEADER name.
+  #     # When the external var changes from TEST_123_ID to TEST_456_ID,
+  #     # just update this line — no image rebuild needed.
+  #     PROXY_HEADER_TEST_ID: "${TEST_123_ID:-default-value}"
+  #     ReverseProxy__Clusters__upstream__Destinations__default__Address: "http://backend:8080"
+  #   ports:
+  #     - "38082:8080"
+  #   depends_on:
+  #     - backend

@@ -9,6 +9,7 @@ Benchmark scaffold for comparing a **.NET 10 Native AOT** and a **Rust (Hyper + 
 | Component | Path | Description |
 | --- | --- | --- |
 | **.NET Proxy** | `src/LiteGateway.Proxy` | Kestrel-based, allocation-conscious reverse proxy |
+| **YARP Proxy** | `src/LiteGateway.YarpProxy` | Vanilla YARP reverse proxy with dynamic header injection |
 | **Rust Proxy** | `src/LiteGateway.Proxy.Rust` | Hyper + Rustls equivalent with identical endpoint model |
 | **Load Client** | `src/LiteGateway.LoadClient` | Async load generator with TUI dashboard and autotune |
 | **Cert Generator** | `scripts/generate-mtls-certs.sh` | ECDSA P-256 CA / server / client cert generation |
@@ -135,6 +136,24 @@ Results from a local native full run (Release AOT, same machine):
 - With connection reuse, throughput is effectively tied (~1.09 k RPS) across HTTPS and mTLS.
 - Without reuse (TLS handshake-heavy), Rust shows higher throughput in this sample.
 - Peak observed: **~1526 RPS** (HTTP/2, mTLS, high concurrency, local-machine dependent).
+
+## YARP Reverse Proxy (Header Injection Gateway)
+
+A vanilla YARP-based reverse proxy with Native AOT, chiseled Docker image, and
+dynamic header injection. See [`docs/yarp-proxy.md`](docs/yarp-proxy.md) for full details.
+
+```bash
+# Build and run YARP proxy + backend
+docker compose -f docker-compose.yarp.yml up --build
+
+# Test: request is forwarded with injected TEST-ID header
+curl http://localhost:38080/api/test -d '{"hello":"world"}' -H 'Content-Type: application/json'
+```
+
+Header injection methods (no image rebuild needed):
+1. **Mounted config file** — `/config/yarp.json` with YARP transforms (hot-reloadable)
+2. **YARP env vars** — `ReverseProxy__Routes__catch-all__Transforms__0__Set=1234`
+3. **`PROXY_HEADER_*` env vars** — `PROXY_HEADER_TEST_ID=1234` → header `TEST-ID: 1234`
 
 ## Specs
 
