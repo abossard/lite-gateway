@@ -1,0 +1,222 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# YARP Proxy — Multi-Platform Native AOT Release
+#
+# Builds self-contained AOT binaries for 6 targets and attaches them to a
+# GitHub Release. Triggered on version tags (v*) or manually.
+#
+# Matrix:
+#   linux-x64, linux-arm64, win-x64, win-arm64, osx-x64, osx-arm64
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Release YARP Proxy
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0). Leave empty for a dry-run build without release."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PROJECT: src/LiteGateway.YarpProxy/LiteGateway.YarpProxy.csproj
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build Job — runs once per matrix entry, produces a zipped artifact
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  build:
+    name: Build ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Linux ──────────────────────────────────────────────────────────
+          - rid: linux-x64
+            os: ubuntu-latest
+            artifact: LiteGateway.YarpProxy
+            archive: tar
+
+          - rid: linux-arm64
+            os: ubuntu-latest
+            artifact: LiteGateway.YarpProxy
+            archive: tar
+            cross: true
+
+          # ── Windows ────────────────────────────────────────────────────────
+          - rid: win-x64
+            os: windows-latest
+            artifact: LiteGateway.YarpProxy.exe
+            archive: zip
+
+          - rid: win-arm64
+            os: windows-latest
+            artifact: LiteGateway.YarpProxy.exe
+            archive: zip
+
+          # ── macOS ──────────────────────────────────────────────────────────
+          - rid: osx-x64
+            os: macos-13          # last x64 macOS runner
+            artifact: LiteGateway.YarpProxy
+            archive: tar
+
+          - rid: osx-arm64
+            os: macos-14          # ARM64 (Apple Silicon) runner
+            artifact: LiteGateway.YarpProxy
+            archive: tar
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # ── Linux: install native AOT toolchain ──────────────────────────────
+      - name: Install native toolchain (Linux x64)
+        if: matrix.rid == 'linux-x64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang zlib1g-dev
+
+      - name: Install cross-compilation toolchain (Linux ARM64)
+        if: matrix.rid == 'linux-arm64'
+        run: |
+          sudo dpkg --add-architecture arm64
+          # Add arm64 package sources
+          sudo tee /etc/apt/sources.list.d/arm64.list > /dev/null <<'EOF'
+          deb [arch=arm64] http://ports.ubuntu.com/ noble main restricted universe
+          deb [arch=arm64] http://ports.ubuntu.com/ noble-updates main restricted universe
+          EOF
+          # Pin existing sources to amd64 only
+          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            clang llvm \
+            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu \
+            zlib1g-dev:arm64
+
+      # ── Restore & Publish ────────────────────────────────────────────────
+      - name: Restore
+        run: dotnet restore ${{ env.PROJECT }} -r ${{ matrix.rid }}
+
+      - name: Publish Native AOT
+        shell: bash
+        run: |
+          extra_args=""
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            extra_args="/p:LinkerFlavor=lld /p:ObjCopyName=aarch64-linux-gnu-objcopy"
+            export CC=aarch64-linux-gnu-gcc
+          fi
+          dotnet publish ${{ env.PROJECT }} \
+            -c Release \
+            -r ${{ matrix.rid }} \
+            --no-restore \
+            --self-contained true \
+            -o publish/${{ matrix.rid }} \
+            $extra_args
+
+      # ── Package ──────────────────────────────────────────────────────────
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar'
+        run: |
+          cd publish/${{ matrix.rid }}
+          tar -czf ../../LiteGateway.YarpProxy-${{ matrix.rid }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive `
+            -Path "publish/${{ matrix.rid }}/${{ matrix.artifact }}" `
+            -DestinationPath "LiteGateway.YarpProxy-${{ matrix.rid }}.zip"
+
+      # ── Upload Artifact ──────────────────────────────────────────────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiteGateway.YarpProxy-${{ matrix.rid }}
+          path: LiteGateway.YarpProxy-${{ matrix.rid }}.*
+          retention-days: 5
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Release Job — collects all artifacts and creates a GitHub Release
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: List release assets
+        run: ls -lhR release-assets/
+
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: YARP Proxy ${{ steps.tag.outputs.tag }}
+          generate_release_notes: true
+          files: release-assets/*
+          body: |
+            ## YARP Reverse Proxy — Native AOT Binaries
+
+            Self-contained, single-file binaries with **zero runtime dependencies**.
+
+            ### Download
+
+            | Platform | Architecture | File |
+            | --- | --- | --- |
+            | **Linux** | x64 | `LiteGateway.YarpProxy-linux-x64.tar.gz` |
+            | **Linux** | ARM64 | `LiteGateway.YarpProxy-linux-arm64.tar.gz` |
+            | **Windows** | x64 | `LiteGateway.YarpProxy-win-x64.zip` |
+            | **Windows** | ARM64 | `LiteGateway.YarpProxy-win-arm64.zip` |
+            | **macOS** | x64 (Intel) | `LiteGateway.YarpProxy-osx-x64.tar.gz` |
+            | **macOS** | ARM64 (Apple Silicon) | `LiteGateway.YarpProxy-osx-arm64.tar.gz` |
+
+            ### Quick Start
+
+            ```bash
+            # Linux / macOS
+            tar xzf LiteGateway.YarpProxy-linux-x64.tar.gz
+            chmod +x LiteGateway.YarpProxy
+            ./LiteGateway.YarpProxy
+
+            # Windows (PowerShell)
+            Expand-Archive LiteGateway.YarpProxy-win-x64.zip -DestinationPath .
+            .\LiteGateway.YarpProxy.exe
+            ```
+
+            See [docs/yarp-proxy-windows.md](docs/yarp-proxy-windows.md) for Windows deployment guide.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -140,7 +140,9 @@ Results from a local native full run (Release AOT, same machine):
 ## YARP Reverse Proxy (Header Injection Gateway)
 
 A vanilla YARP-based reverse proxy with Native AOT, chiseled Docker image, and
-dynamic header injection. See [`docs/yarp-proxy.md`](docs/yarp-proxy.md) for full details.
+dynamic header injection. See [`docs/yarp-proxy.md`](docs/yarp-proxy.md) for full details
+or [`docs/yarp-proxy-windows.md`](docs/yarp-proxy-windows.md) for the **Windows deployment guide**
+(PowerShell examples, Windows Service, IIS integration).
 
 ```bash
 # Build and run YARP proxy + backend
@@ -154,6 +156,19 @@ Header injection methods (no image rebuild needed):
 1. **Mounted config file** — `/config/yarp.json` with YARP transforms (hot-reloadable)
 2. **YARP env vars** — `ReverseProxy__Routes__catch-all__Transforms__0__Set=1234`
 3. **`PROXY_HEADER_*` env vars** — `PROXY_HEADER_TEST_ID=1234` → header `TEST-ID: 1234`
+
+## CI/CD — Automated Release Builds
+
+The repository includes a GitHub Actions workflow (`.github/workflows/release-yarp.yml`) that
+builds Native AOT binaries for **6 platforms** and attaches them to a GitHub Release:
+
+| Platform | Architecture |
+| --- | --- |
+| Linux | x64, ARM64 |
+| Windows | x64, ARM64 |
+| macOS | x64 (Intel), ARM64 (Apple Silicon) |
+
+Triggered automatically on version tags (`v*`) or via manual dispatch.
 
 ## Specs
 
