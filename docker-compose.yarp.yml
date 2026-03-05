@@ -37,7 +37,7 @@ services:
       context: .
       dockerfile: src/LiteGateway.YarpProxy/Dockerfile
     volumes:
-      - ./config/yarp.json:/config/yarp.json:ro
+      - ./config/yarp.json:/app/config.json:ro
     ports:
       - "38080:8080"
     depends_on:

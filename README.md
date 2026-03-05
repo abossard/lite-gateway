@@ -1,175 +1,288 @@
-# Lite Gateway Benchmark Scaffold
+# Lite Gateway — YARP Reverse Proxy
 
-Benchmark scaffold for comparing a **.NET 10 Native AOT** and a **Rust (Hyper + Rustls)** mTLS reverse-proxy under identical load. The goal is to measure throughput, latency, and connection-handling across HTTP, HTTPS, and mTLS — with and without connection reuse.
+A lightweight, high-performance reverse proxy built on [YARP](https://microsoft.github.io/reverse-proxy/)
+with **.NET 10 Native AOT**. It forwards HTTP requests to a backend and injects custom headers —
+all through declarative configuration, zero custom proxy code.
 
-![Lite Gateway architecture](docs/architecture.svg)
+```
+  Client ──▶ Lite Gateway (8080) ──▶ Backend API
+              ├─ injects headers
+              ├─ routes by path
+              └─ hot-reloads config
+```
 
-## Components
+## Download
 
-| Component | Path | Description |
-| --- | --- | --- |
-| **.NET Proxy** | `src/LiteGateway.Proxy` | Kestrel-based, allocation-conscious reverse proxy |
-| **YARP Proxy** | `src/LiteGateway.YarpProxy` | Vanilla YARP reverse proxy with dynamic header injection |
-| **Rust Proxy** | `src/LiteGateway.Proxy.Rust` | Hyper + Rustls equivalent with identical endpoint model |
-| **Load Client** | `src/LiteGateway.LoadClient` | Async load generator with TUI dashboard and autotune |
-| **Cert Generator** | `scripts/generate-mtls-certs.sh` | ECDSA P-256 CA / server / client cert generation |
+Prebuilt binaries for all platforms — single file, zero dependencies:
 
-Both proxies expose three endpoints: HTTP (`:8080`), HTTPS (`:8443`), and mTLS (`:9443`). In standalone mode each applies a configurable async delay (default 5 s) then echoes the request JSON.
+| Platform | Download |
+| --- | --- |
+| **Linux x64** | [`LiteGateway.YarpProxy-linux-x64.tar.gz`](../../releases/latest) |
+| **Linux ARM64** | [`LiteGateway.YarpProxy-linux-arm64.tar.gz`](../../releases/latest) |
+| **Windows x64** | [`LiteGateway.YarpProxy-win-x64.zip`](../../releases/latest) |
+| **Windows ARM64** | [`LiteGateway.YarpProxy-win-arm64.zip`](../../releases/latest) |
+| **macOS Intel** | [`LiteGateway.YarpProxy-osx-x64.tar.gz`](../../releases/latest) |
+| **macOS Apple Silicon** | [`LiteGateway.YarpProxy-osx-arm64.tar.gz`](../../releases/latest) |
 
-## Prerequisites
-
-- .NET 10 SDK
-- Rust stable toolchain + Cargo
-- OpenSSL
+Or build from source: `dotnet publish src/LiteGateway.YarpProxy -c Release -r <rid>`
 
 ## Quick Start
 
-```bash
-# 1. Generate mTLS certificates
-./scripts/generate-mtls-certs.sh certs/generated
-source certs/generated/mtls.env
+### 1. Create a config file
 
-# 2. Start a proxy
-dotnet run --project src/LiteGateway.Proxy/LiteGateway.Proxy.csproj          # .NET
-cargo run --manifest-path src/LiteGateway.Proxy.Rust/Cargo.toml --release    # Rust
+Create `config.json` in the directory where you'll run the proxy:
 
-# 3. Run the load client (single target)
-dotnet run --project src/LiteGateway.LoadClient/LiteGateway.LoadClient.csproj -- \
-  --url https://localhost:9443/api/test \
-  --cert-pfx "$CLIENT_PFX" --cert-password "$CLIENT_PFX_PASSWORD" \
-  --custom-ca "$CLIENT_CA_CERT" \
-  --concurrency 1024 --duration 60 --http-version 2
-
-# 4. Run the full 6-scenario matrix with autotune
-dotnet run --project src/LiteGateway.LoadClient/LiteGateway.LoadClient.csproj -- --mode matrix
+```json
+{
+  "ReverseProxy": {
+    "Routes": {
+      "catch-all": {
+        "ClusterId": "upstream",
+        "Match": { "Path": "{**catch-all}" },
+        "Transforms": [
+          { "RequestHeader": "X-Tenant-ID", "Set": "customer-42" }
+        ]
+      }
+    },
+    "Clusters": {
+      "upstream": {
+        "Destinations": {
+          "default": { "Address": "http://localhost:3000" }
+        }
+      }
+    }
+  }
+}
 ```
 
-The matrix covers all six scenario combinations:
-**http** / **https** / **https+mTLS** × **connection reuse** / **no reuse**
-
-## Run Modes
-
-### Host automation (`run-everything.sh`)
-
-Generates certs, builds both proxies + load client, then runs the matrix on bare-metal.
+### 2. Run
 
 ```bash
-./scripts/run-everything.sh --quick --proxy both   # fast profile (recommended)
-./scripts/run-everything.sh --full  --proxy both   # full profile (longer)
+# Linux / macOS
+./LiteGateway.YarpProxy
+
+# Windows (PowerShell)
+.\LiteGateway.YarpProxy.exe
+
+# Or specify a config path
+./LiteGateway.YarpProxy --config /path/to/my-config.json
 ```
 
-| Flag | Effect |
+### 3. Test
+
+```bash
+curl http://localhost:8080/api/test
+# → Forwarded to http://localhost:3000/api/test with header X-Tenant-ID: customer-42
+```
+
+### What you'll see at startup
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║           Lite Gateway — YARP Reverse Proxy                 ║
+╚══════════════════════════════════════════════════════════════╝
+
+  ✅ Config file : /app/config.json
+  ✅ PROXY_HEADER_* env vars (2 detected):
+       PROXY_HEADER_TEST_ID → TEST-ID: 1234
+       PROXY_HEADER_X_TENANT_ID → X-TENANT-ID: customer-42
+  🌐 Listen URL  : http://+:8080
+```
+
+If something is wrong, the proxy tells you:
+
+```
+  ⚠️  Config file : /app/config.json (NOT FOUND)
+  ⚠️  WARNING: Cluster 'upstream' → http://localhost:5000 (default — did you forget to set the upstream?)
+```
+
+---
+
+## Configuration
+
+The proxy loads configuration from these sources (highest priority wins):
+
+| Priority | Source | Hot-Reload |
+| :---: | --- | :---: |
+| **3 (highest)** | Environment variables | ❌ |
+| **2** | Config JSON file (`--config` or `./config.json`) | ✅ |
+| **1** | Built-in `appsettings.json` defaults | — |
+
+### Config File (recommended)
+
+By default the proxy looks for `config.json` **in the working directory**.
+Override with `--config` (or `-c`):
+
+```bash
+./LiteGateway.YarpProxy --config /etc/lite-gateway/production.json
+```
+
+The file uses standard [YARP configuration](https://microsoft.github.io/reverse-proxy/articles/config-files.html).
+Changes are picked up automatically — **no restart needed**.
+
+<details>
+<summary>📋 Full config example (click to expand)</summary>
+
+```json
+{
+  "ReverseProxy": {
+    "Routes": {
+      "api": {
+        "ClusterId": "api-backend",
+        "Match": { "Path": "/api/{**remainder}" },
+        "Transforms": [
+          { "RequestHeader": "X-Gateway", "Set": "lite-gateway" },
+          { "RequestHeader": "X-Tenant-ID", "Set": "acme-corp" }
+        ]
+      },
+      "static": {
+        "ClusterId": "static-backend",
+        "Match": { "Path": "/static/{**remainder}" }
+      }
+    },
+    "Clusters": {
+      "api-backend": {
+        "Destinations": {
+          "primary": { "Address": "https://api.internal:443" },
+          "fallback": { "Address": "https://api-dr.internal:443" }
+        },
+        "LoadBalancingPolicy": "RoundRobin",
+        "HealthCheck": {
+          "Active": {
+            "Enabled": true,
+            "Interval": "00:00:30",
+            "Timeout": "00:00:10",
+            "Path": "/health"
+          }
+        }
+      },
+      "static-backend": {
+        "Destinations": {
+          "default": { "Address": "http://cdn:8080" }
+        }
+      }
+    }
+  }
+}
+```
+
+</details>
+
+### Environment Variables
+
+Set YARP config via env vars using `__` as the path separator:
+
+```bash
+export ReverseProxy__Clusters__upstream__Destinations__default__Address="http://backend:3000"
+export ReverseProxy__Routes__catch-all__Transforms__0__RequestHeader="X-Tenant-ID"
+export ReverseProxy__Routes__catch-all__Transforms__0__Set="customer-42"
+```
+
+### `PROXY_HEADER_*` Shorthand
+
+The simplest way to inject headers — underscores become hyphens:
+
+```bash
+export PROXY_HEADER_X_TENANT_ID="customer-42"      # → X-Tenant-ID: customer-42
+export PROXY_HEADER_X_CORRELATION_ID="abc-123"      # → X-Correlation-ID: abc-123
+export PROXY_HEADER_TEST_ID="1234"                   # → TEST-ID: 1234
+```
+
+### Listen Address
+
+```bash
+export ASPNETCORE_URLS="http://+:9090"               # default: http://localhost:8080
+```
+
+---
+
+## Docker
+
+```bash
+# Build
+docker build -t lite-gateway -f src/LiteGateway.YarpProxy/Dockerfile .
+
+# Run with config file
+docker run -v ./config.json:/app/config.json:ro -p 8080:8080 lite-gateway
+
+# Run with env vars
+docker run \
+  -e PROXY_HEADER_X_TENANT_ID=customer-42 \
+  -e ReverseProxy__Clusters__upstream__Destinations__default__Address=http://host.docker.internal:3000 \
+  -p 8080:8080 lite-gateway
+```
+
+### Docker Compose
+
+```yaml
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.YarpProxy/Dockerfile
+    volumes:
+      - ./config.json:/app/config.json:ro
+    ports:
+      - "8080:8080"
+```
+
+See [`docker-compose.yarp.yml`](docker-compose.yarp.yml) for a full example with a backend service.
+
+| Property | Value |
 | --- | --- |
-| `--proxy <dotnet\|rust\|both>` | Proxy implementation(s) to test |
-| `--quick` / `--full` | Fast matrix (8 s/run) vs full defaults (20 s/run) |
-| `--sleep-ms <ms>` | Per-request proxy delay (default 5000) |
-| `--skip-build` | Skip build step |
-| `--skip-certs` | Reuse existing certificates |
+| Base image | `runtime-deps:10.0-noble-chiseled` (distroless) |
+| Shell | None |
+| User | Non-root |
+| Size | ~15–25 MB |
 
-Logs: `.run-logs/` (`dotnet-proxy.log`, `rust-proxy.log`, `*-matrix.log`).
+---
 
-### Docker automation (`run-docker-matrix.sh`)
+## Build from Source
 
-Same workflow but proxies run in Docker; load client runs on the host.
-
-```bash
-./scripts/run-docker-matrix.sh --quick --proxy both
-./scripts/run-docker-matrix.sh --full  --proxy both
-```
-
-Docker port mapping:
-
-| Proxy | HTTP | HTTPS | mTLS |
-| --- | --- | --- | --- |
-| .NET | `18080` | `18443` | `19443` |
-| Rust | `28080` | `28443` | `29443` |
-
-Logs: `.run-logs/docker/`.
-
-### JMeter test plan (`run-jmeter-testplan.sh`)
-
-Runs `specs/jmeter/TestPlan.jmx` in non-GUI mode with mTLS client certs. Validates zero failed samples/assertions.
+**Prerequisites:** [.NET 10 SDK](https://dot.net). For AOT: C/C++ toolchain (clang on Linux/macOS, VS Build Tools on Windows).
 
 ```bash
-./scripts/run-jmeter-testplan.sh --proxy both               # default scale
-./scripts/run-jmeter-testplan.sh --proxy both --high-scale   # high-scale preset
-./scripts/run-jmeter-testplan.sh --proxy both \
-  --threads 20000 --ramp-seconds 45 --loops 12               # custom scale
+# Development (JIT)
+dotnet run --project src/LiteGateway.YarpProxy
+
+# AOT publish (single-file binary)
+dotnet publish src/LiteGateway.YarpProxy -c Release -r linux-x64     # or osx-arm64, win-x64, etc.
 ```
 
-Logs: `.run-logs/jmeter/`.
+## Windows
 
-## Performance Tips
+See [**docs/yarp-proxy-windows.md**](docs/yarp-proxy-windows.md) for the full Windows guide:
+PowerShell examples, Windows Service setup, IIS integration, and troubleshooting.
 
-For realistic numbers, publish **Release Native AOT** binaries instead of `dotnet run`:
+## CI/CD
 
-```bash
-dotnet publish src/LiteGateway.Proxy/LiteGateway.Proxy.csproj -c Release -r osx-arm64 --self-contained true /p:PublishAot=true
-dotnet publish src/LiteGateway.LoadClient/LiteGateway.LoadClient.csproj -c Release -r osx-arm64 --self-contained true /p:PublishAot=true
-```
+The GitHub Actions workflow [`.github/workflows/release-yarp.yml`](.github/workflows/release-yarp.yml)
+builds Native AOT binaries for 6 platforms (Linux/Windows/macOS × x64/ARM64) and publishes
+them as GitHub Release assets on every version tag (`v*`).
 
-### Duration defaults
+## Performance
 
-| Mode | Parameter | Default |
-| --- | --- | --- |
-| Single run | `--duration` | 60 s |
-| Matrix (per attempt) | `--matrix-run-duration` | 20 s |
-| Quick profile override | — | 8 s |
+Benchmarked with YARP proxy (AOT, Docker) forwarding to an echo backend:
 
-Full matrix usually completes in 12–22 min with defaults.
+| Tool | Concurrency | RPS | Avg Latency |
+| --- | ---: | ---: | ---: |
+| **hey** | 200 | **18,310** | 10.9 ms |
+| **wrk** | 200 | **20,983** | 9.9 ms |
 
-## Benchmark Results
+## Reference
 
-All numbers are **successful requests per second (RPS)** — higher is better.
-Results from a local native full run (Release AOT, same machine):
+- [YARP Documentation](https://microsoft.github.io/reverse-proxy/)
+- [YARP Config File Reference](https://microsoft.github.io/reverse-proxy/articles/config-files.html)
+- [Native AOT Deployment](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
 
-| Scenario | .NET (RPS) | Rust (RPS) |
-| --- | ---: | ---: |
-| http-reuse | 1025.98 | 1048.16 |
-| http-no-reuse | 732.59 | 510.12 |
-| https-reuse | 1092.05 | 1091.01 |
-| https-no-reuse | 245.50 | 617.07 |
-| https-mtls-reuse | 1091.88 | 1090.88 |
-| https-mtls-no-reuse | 116.02 | 200.19 |
+---
 
-**Takeaways:**
-- With connection reuse, throughput is effectively tied (~1.09 k RPS) across HTTPS and mTLS.
-- Without reuse (TLS handshake-heavy), Rust shows higher throughput in this sample.
-- Peak observed: **~1526 RPS** (HTTP/2, mTLS, high concurrency, local-machine dependent).
+<details>
+<summary>📁 Legacy benchmark scaffold</summary>
 
-## YARP Reverse Proxy (Header Injection Gateway)
+This repository originally contained a benchmark scaffold comparing .NET, Rust, and YARP proxies.
+The benchmark components (`src/LiteGateway.Proxy`, `src/LiteGateway.Proxy.Rust`,
+`src/LiteGateway.LoadClient`) and related scripts remain in the repo for reference.
+See `docs/benchmarks.md` for historical benchmark results and `specs/` for the original specification.
 
-A vanilla YARP-based reverse proxy with Native AOT, chiseled Docker image, and
-dynamic header injection. See [`docs/yarp-proxy.md`](docs/yarp-proxy.md) for full details
-or [`docs/yarp-proxy-windows.md`](docs/yarp-proxy-windows.md) for the **Windows deployment guide**
-(PowerShell examples, Windows Service, IIS integration).
-
-```bash
-# Build and run YARP proxy + backend
-docker compose -f docker-compose.yarp.yml up --build
-
-# Test: request is forwarded with injected TEST-ID header
-curl http://localhost:38080/api/test -d '{"hello":"world"}' -H 'Content-Type: application/json'
-```
-
-Header injection methods (no image rebuild needed):
-1. **Mounted config file** — `/config/yarp.json` with YARP transforms (hot-reloadable)
-2. **YARP env vars** — `ReverseProxy__Routes__catch-all__Transforms__0__Set=1234`
-3. **`PROXY_HEADER_*` env vars** — `PROXY_HEADER_TEST_ID=1234` → header `TEST-ID: 1234`
-
-## CI/CD — Automated Release Builds
-
-The repository includes a GitHub Actions workflow (`.github/workflows/release-yarp.yml`) that
-builds Native AOT binaries for **6 platforms** and attaches them to a GitHub Release:
-
-| Platform | Architecture |
-| --- | --- |
-| Linux | x64, ARM64 |
-| Windows | x64, ARM64 |
-| macOS | x64 (Intel), ARM64 (Apple Silicon) |
-
-Triggered automatically on version tags (`v*`) or via manual dispatch.
-
-## Specs
-
-See `specs/ABSTRACT_SPEC.md` and the source requirement documents in `specs/`.
+</details>

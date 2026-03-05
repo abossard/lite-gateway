@@ -1,12 +1,12 @@
-# YARP Proxy — Windows Deployment Guide
+# Lite Gateway — Windows Deployment Guide
 
-A step-by-step guide for building, configuring, and running the **YARP Reverse Proxy**
+A step-by-step guide for building, configuring, and running **Lite Gateway**
 as a native Windows application. All examples use **PowerShell** and Windows-native tooling.
 
 > **What is this?** A lightweight, high-performance reverse proxy built on
 > [YARP](https://microsoft.github.io/reverse-proxy/) with Native AOT compilation.
 > It forwards HTTP requests to a backend and can inject custom headers — all without
-> writing any proxy code. Configuration is 100% declarative.
+> writing any proxy code. Configuration is 100% declarative via a simple `config.json`.
 
 ---
 
@@ -15,15 +15,17 @@ as a native Windows application. All examples use **PowerShell** and Windows-nat
 1. [Prerequisites](#prerequisites)
 2. [Build from Source](#build-from-source)
 3. [Run the Proxy](#run-the-proxy)
-4. [Configuration](#configuration)
+4. [Startup Banner](#startup-banner)
+5. [Configuration](#configuration)
    - [Method 1: JSON Config File (Recommended)](#method-1-json-config-file-recommended)
    - [Method 2: Environment Variables (YARP Native)](#method-2-environment-variables-yarp-native)
    - [Method 3: PROXY_HEADER_* Shorthand](#method-3-proxy_header-shorthand)
-5. [Header Injection Examples](#header-injection-examples)
-6. [Run as a Windows Service](#run-as-a-windows-service)
-7. [Run Behind IIS (Reverse Proxy)](#run-behind-iis-reverse-proxy)
-8. [Firewall & Port Configuration](#firewall--port-configuration)
-9. [Troubleshooting](#troubleshooting)
+6. [Header Injection Examples](#header-injection-examples)
+7. [Run as a Windows Service](#run-as-a-windows-service)
+8. [Run Behind IIS (Reverse Proxy)](#run-behind-iis-reverse-proxy)
+9. [Firewall & Port Configuration](#firewall--port-configuration)
+10. [Troubleshooting](#troubleshooting)
+11. [Quick Reference Card](#quick-reference-card)
 
 ---
 
@@ -100,25 +102,32 @@ artifacts\win-arm64\LiteGateway.YarpProxy.exe
 ### Quick Start
 
 ```powershell
-# Run the compiled binary
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+# Run the compiled binary (looks for config.json in current directory)
+.\LiteGateway.YarpProxy.exe
+
+# Or specify a config file explicitly
+.\LiteGateway.YarpProxy.exe --config C:\path\to\config.json
+
+# Short form
+.\LiteGateway.YarpProxy.exe -c .\my-config.json
 ```
 
 The proxy listens on `http://localhost:8080` by default and forwards all requests
-to `http://localhost:5000` (the default upstream in `appsettings.json`).
+to the upstream defined in your `config.json` (or `http://localhost:5000` from the
+built-in `appsettings.json` defaults).
 
 ### Change the Listening Port
 
 ```powershell
 $env:ASPNETCORE_URLS = "http://+:9090"
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 ```
 
 ### Change the Upstream Backend
 
 ```powershell
 $env:ReverseProxy__Clusters__upstream__Destinations__default__Address = "http://my-backend:3000"
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 ```
 
 ### Verify It Works
@@ -136,19 +145,56 @@ curl.exe http://localhost:8080/api/test -d '{"hello":"world"}' -H "Content-Type:
 
 ---
 
+## Startup Banner
+
+When Lite Gateway starts, it prints a banner summarizing the active configuration.
+This makes it easy to verify settings at a glance — especially useful when
+debugging environment variable overrides or config file issues.
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║                      Lite Gateway                           ║
+╠══════════════════════════════════════════════════════════════╣
+║  Config file : C:\LiteGateway\config.json                   ║
+║  Listening   : http://+:8080                                ║
+║  Upstream    : https://api.acme-corp.internal:443           ║
+║  Headers     : X-Tenant-ID: acme-corp                       ║
+║              : X-Forwarded-By: lite-gateway-v1              ║
+╠══════════════════════════════════════════════════════════════╣
+║  ⚠ Health check enabled (interval: 30s)                    ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+The banner shows:
+- **Config file** — the resolved path to the config file in use (`config.json` in CWD or the `--config` override)
+- **Listening** — the bound URL(s)
+- **Upstream** — the destination backend address(es)
+- **Headers** — any injected headers (from JSON config or `PROXY_HEADER_*` env vars)
+- **Warnings** — health check status, missing config, or other notices
+
+> **💡 Tip:** If you see `Config file : (none)` in the banner, no `config.json` was
+> found in the current directory and no `--config` flag was provided. The proxy will
+> still run using environment variables and `appsettings.json` defaults.
+
+---
+
 ## Configuration
 
 The proxy reads configuration from three sources, in priority order (highest wins):
 
 | Priority | Source | Hot-Reload? |
 | :---: | --- | :---: |
-| **3 (highest)** | Environment variables | ❌ (restart needed) |
-| **2** | Mounted JSON config file | ✅ |
+| **4 (highest)** | `--config` CLI flag | ✅ |
+| **3** | Environment variables | ❌ (restart needed) |
+| **2** | `config.json` in current working directory | ✅ |
 | **1 (lowest)** | `appsettings.json` (built-in defaults) | — |
 
 ### Method 1: JSON Config File (Recommended)
 
-Create a `yarp-config.json` file anywhere on disk:
+By default, Lite Gateway looks for **`config.json` in the current working directory**.
+You can override this with the `--config` (or `-c`) flag to point to any path.
+
+Create a `config.json` file:
 
 ```json
 {
@@ -174,14 +220,14 @@ Create a `yarp-config.json` file anywhere on disk:
 }
 ```
 
-Then mount it when running:
+Then run the proxy:
 
 ```powershell
-# Copy your config to the expected path
-Copy-Item .\yarp-config.json C:\config\yarp.json
+# Option A: Place config.json in the same directory and just run
+.\LiteGateway.YarpProxy.exe
 
-# Run the proxy (it looks for C:\config\yarp.json or /config/yarp.json)
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+# Option B: Point to a config file anywhere on disk
+.\LiteGateway.YarpProxy.exe --config C:\LiteGateway\config.json
 ```
 
 > **♻️ Hot-Reload:** Edit the JSON file while the proxy is running —
@@ -236,7 +282,7 @@ $env:ReverseProxy__Routes__catch-all__Transforms__1__RequestHeader = "X-Correlat
 $env:ReverseProxy__Routes__catch-all__Transforms__1__Set = "abc-123"
 
 # Run
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 ```
 
 To set them permanently (survives reboots):
@@ -262,7 +308,7 @@ $env:PROXY_HEADER_TEST_ID = "1234"
 # Don't forget the upstream address
 $env:ReverseProxy__Clusters__upstream__Destinations__default__Address = "http://my-backend:8080"
 
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 ```
 
 This injects three headers on every proxied request:
@@ -282,7 +328,7 @@ $env:PROXY_HEADER_X_ENVIRONMENT = "production"
 $env:ReverseProxy__Clusters__upstream__Destinations__default__Address = "https://api.internal.example.com"
 $env:ASPNETCORE_URLS = "http://+:8080"
 
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 ```
 
 Every request through `http://localhost:8080/*` now includes:
@@ -299,13 +345,13 @@ Your deployment tool sets `DEVICE_SERIAL=SN-12345`. Map it to a standardized hea
 # Map external variable to PROXY_HEADER format
 $env:PROXY_HEADER_X_DEVICE_SERIAL = $env:DEVICE_SERIAL   # "SN-12345"
 
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 # → Injects header: X-Device-Serial: SN-12345
 ```
 
 ### Scenario: Full Production Config File
 
-Save as `C:\LiteGateway\config\yarp.json`:
+Save as `C:\LiteGateway\config.json`:
 
 ```json
 {
@@ -358,16 +404,16 @@ The AOT binary can run as a native Windows Service using `sc.exe`.
 # Copy binary and config to a permanent location
 New-Item -ItemType Directory -Force -Path C:\LiteGateway
 Copy-Item .\artifacts\win-x64\LiteGateway.YarpProxy.exe C:\LiteGateway\
-Copy-Item .\config\yarp.json C:\config\yarp.json
+Copy-Item .\config.json C:\LiteGateway\config.json
 
-# Create the Windows Service
+# Create the Windows Service (--config points to the permanent config location)
 sc.exe create "LiteGateway" `
-    binPath= "C:\LiteGateway\LiteGateway.YarpProxy.exe" `
+    binPath= "C:\LiteGateway\LiteGateway.YarpProxy.exe --config C:\LiteGateway\config.json" `
     start= auto `
-    displayname= "Lite Gateway YARP Proxy"
+    displayname= "Lite Gateway Reverse Proxy"
 
 # Set description
-sc.exe description "LiteGateway" "YARP reverse proxy with header injection"
+sc.exe description "LiteGateway" "Lite Gateway reverse proxy with header injection"
 ```
 
 ### 2. Configure Environment Variables for the Service
@@ -408,7 +454,7 @@ sc.exe delete "LiteGateway"
 > **💡 Tip:** For production Windows Services, consider wrapping with
 > [NSSM](https://nssm.cc/) for better logging and restart handling:
 > ```powershell
-> nssm install LiteGateway C:\LiteGateway\LiteGateway.YarpProxy.exe
+> nssm install LiteGateway C:\LiteGateway\LiteGateway.YarpProxy.exe --config C:\LiteGateway\config.json
 > nssm set LiteGateway AppStdout C:\LiteGateway\logs\stdout.log
 > nssm set LiteGateway AppStderr C:\LiteGateway\logs\stderr.log
 > nssm set LiteGateway AppEnvironmentExtra "ASPNETCORE_URLS=http://+:8080"
@@ -430,6 +476,7 @@ Download and install the [.NET Hosting Bundle](https://dotnet.microsoft.com/down
 # Create the application directory
 New-Item -ItemType Directory -Force -Path C:\inetpub\LiteGateway
 Copy-Item .\artifacts\win-x64\LiteGateway.YarpProxy.exe C:\inetpub\LiteGateway\
+Copy-Item .\config.json C:\inetpub\LiteGateway\config.json
 ```
 
 Create `C:\inetpub\LiteGateway\web.config`:
@@ -442,6 +489,7 @@ Create `C:\inetpub\LiteGateway\web.config`:
       <add name="aspNetCore" path="*" verb="*" modules="AspNetCoreModuleV2" resourceType="Unspecified" />
     </handlers>
     <aspNetCore processPath=".\LiteGateway.YarpProxy.exe"
+                arguments="--config .\config.json"
                 stdoutLogEnabled="true"
                 stdoutLogFile=".\logs\stdout"
                 hostingModel="OutOfProcess">
@@ -471,7 +519,7 @@ New-Website -Name "LiteGateway" `
 
 ```powershell
 # Allow inbound traffic on the proxy port
-New-NetFirewallRule -DisplayName "Lite Gateway YARP Proxy" `
+New-NetFirewallRule -DisplayName "Lite Gateway" `
     -Direction Inbound -Action Allow `
     -Protocol TCP -LocalPort 8080
 
@@ -513,13 +561,18 @@ Stop-Process -Id <PID> -Force
 
 ### Config file not found
 
-The proxy looks for the config file at `/config/yarp.json`. On Windows, this translates
-to the root of the current drive (e.g., `C:\config\yarp.json`).
+Lite Gateway looks for **`config.json` in the current working directory** by default.
+If no config file is found and no `--config` flag is provided, the proxy runs with
+environment variables and `appsettings.json` defaults only.
 
 **Options:**
-1. Create `C:\config\yarp.json`
-2. Use environment variables instead (Method 2 or 3)
-3. Run from the project directory with `dotnet run` (uses `appsettings.json`)
+1. Place `config.json` in the directory where you run the proxy
+2. Use `--config C:\path\to\config.json` to specify an explicit path
+3. Use environment variables instead (Method 2 or 3)
+4. Run from the project directory with `dotnet run` (uses `appsettings.json`)
+
+> **💡 Tip:** Check the [startup banner](#startup-banner) output — the `Config file` line
+> shows exactly which file was loaded (or `(none)` if no config file was found).
 
 ### Environment variables not taking effect
 
@@ -535,13 +588,14 @@ PowerShell `$env:` variables are session-scoped. For persistence:
 # Restart the proxy after setting machine/user env vars
 ```
 
-### View active YARP configuration
+### View active configuration
 
-The proxy logs its configuration at startup in Development mode:
+Lite Gateway prints its full configuration in the [startup banner](#startup-banner)
+every time it starts. For additional detail, enable Development mode:
 
 ```powershell
 $env:ASPNETCORE_ENVIRONMENT = "Development"
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 ```
 
 ---
@@ -553,21 +607,25 @@ $env:ASPNETCORE_ENVIRONMENT = "Development"
 dotnet publish src\LiteGateway.YarpProxy\LiteGateway.YarpProxy.csproj `
     -c Release -r win-x64 -o artifacts\win-x64
 
-# ── RUN (standalone) ──────────────────────────────────────────────────────
+# ── RUN (default config.json in CWD) ─────────────────────────────────────
+.\LiteGateway.YarpProxy.exe
+
+# ── RUN (explicit config path) ───────────────────────────────────────────
+.\LiteGateway.YarpProxy.exe --config C:\LiteGateway\config.json
+
+# ── RUN (env vars only) ──────────────────────────────────────────────────
 $env:ASPNETCORE_URLS = "http://+:8080"
 $env:ReverseProxy__Clusters__upstream__Destinations__default__Address = "http://backend:3000"
 $env:PROXY_HEADER_X_TENANT_ID = "customer-42"
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
-
-# ── RUN (config file) ─────────────────────────────────────────────────────
-Copy-Item .\config\yarp.json C:\config\yarp.json
-.\artifacts\win-x64\LiteGateway.YarpProxy.exe
+.\LiteGateway.YarpProxy.exe
 
 # ── TEST ──────────────────────────────────────────────────────────────────
 Invoke-RestMethod http://localhost:8080/api/test -Method Post `
     -ContentType "application/json" -Body '{"hello":"world"}'
 
 # ── WINDOWS SERVICE ───────────────────────────────────────────────────────
-sc.exe create LiteGateway binPath= "C:\LiteGateway\LiteGateway.YarpProxy.exe" start= auto
+sc.exe create LiteGateway `
+    binPath= "C:\LiteGateway\LiteGateway.YarpProxy.exe --config C:\LiteGateway\config.json" `
+    start= auto
 Start-Service LiteGateway
 ```
