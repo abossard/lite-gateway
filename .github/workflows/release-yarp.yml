@@ -94,13 +94,20 @@ jobs:
         if: matrix.rid == 'linux-arm64'
         run: |
           sudo dpkg --add-architecture arm64
-          # Add arm64 package sources
-          sudo tee /etc/apt/sources.list.d/arm64.list > /dev/null <<'EOF'
-          deb [arch=arm64] http://ports.ubuntu.com/ noble main restricted universe
-          deb [arch=arm64] http://ports.ubuntu.com/ noble-updates main restricted universe
+
+          # Ubuntu 24.04 uses deb822 format — pin existing sources to amd64
+          # and add arm64 sources from ports.ubuntu.com
+          sudo sed -i 's/^Types: deb$/Architectures: amd64\nTypes: deb/' /etc/apt/sources.list.d/ubuntu.sources
+
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources > /dev/null <<'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports/
+          Suites: noble noble-updates noble-security
+          Components: main restricted universe
+          Architectures: arm64
+          Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
           EOF
-          # Pin existing sources to amd64 only
-          sudo sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             clang llvm \
@@ -108,10 +115,7 @@ jobs:
             gcc-aarch64-linux-gnu \
             zlib1g-dev:arm64
 
-      # ── Restore & Publish ────────────────────────────────────────────────
-      - name: Restore
-        run: dotnet restore ${{ env.PROJECT }} -r ${{ matrix.rid }}
-
+      # ── Publish (restore + AOT compile in one step) ──────────────────────
       - name: Publish Native AOT
         shell: bash
         run: |
@@ -123,7 +127,6 @@ jobs:
           dotnet publish ${{ env.PROJECT }} \
             -c Release \
             -r ${{ matrix.rid }} \
-            --no-restore \
             --self-contained true \
             -o publish/${{ matrix.rid }} \
             $extra_args
