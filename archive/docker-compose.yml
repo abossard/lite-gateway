@@ -1,0 +1,50 @@
+services:
+  dotnet-proxy:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.Proxy/Dockerfile
+    environment:
+      LITEGATEWAY_Proxy__EnableHttp: "true"
+      LITEGATEWAY_Proxy__HttpPort: "8080"
+      LITEGATEWAY_Proxy__EnableHttps: "true"
+      LITEGATEWAY_Proxy__HttpsPort: "8443"
+      LITEGATEWAY_Proxy__EnableMtls: "true"
+      LITEGATEWAY_Proxy__MtlsPort: "9443"
+      LITEGATEWAY_Proxy__SleepDurationMs: "${LITEGATEWAY_PROXY_SLEEP_MS:-5000}"
+      LITEGATEWAY_Proxy__ServerCertificatePath: "/certs/generated/server.pfx"
+      LITEGATEWAY_Proxy__ServerCertificatePassword: "${CLIENT_PFX_PASSWORD:-changeit}"
+      LITEGATEWAY_Proxy__TrustedCaPath: "/certs/generated/ca.cert.pem"
+      LITEGATEWAY_Proxy__OutboundClientCertificatePath: "/certs/generated/client.pfx"
+      LITEGATEWAY_Proxy__OutboundClientCertificatePassword: "${CLIENT_PFX_PASSWORD:-changeit}"
+      LITEGATEWAY_Proxy__UpstreamUrl: ""
+      LITEGATEWAY_Proxy__PassConnectionClose: "false"
+    volumes:
+      - ./certs/generated:/certs/generated:ro
+    ports:
+      - "18080:8080"
+      - "18443:8443"
+      - "19443:9443"
+
+  rust-proxy:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.Proxy.Rust/Dockerfile
+    environment:
+      RUST_LOG: "warn"
+      LITEGATEWAY_Proxy__EnableHttp: "true"
+      LITEGATEWAY_Proxy__HttpPort: "8080"
+      LITEGATEWAY_Proxy__EnableHttps: "true"
+      LITEGATEWAY_Proxy__HttpsPort: "8443"
+      LITEGATEWAY_Proxy__EnableMtls: "true"
+      LITEGATEWAY_Proxy__MtlsPort: "9443"
+      LITEGATEWAY_Proxy__SleepDurationMs: "${LITEGATEWAY_PROXY_SLEEP_MS:-5000}"
+      LITEGATEWAY_Proxy__ServerCertificatePath: "/certs/generated/server.pfx"
+      LITEGATEWAY_Proxy__TrustedCaPath: "/certs/generated/ca.cert.pem"
+      LITEGATEWAY_Proxy__UpstreamUrl: ""
+      LITEGATEWAY_Proxy__PassConnectionClose: "false"
+    volumes:
+      - ./certs/generated:/certs/generated:ro
+    ports:
+      - "28080:8080"
+      - "28443:8443"
+      - "29443:9443"

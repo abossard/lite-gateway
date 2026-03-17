@@ -7,7 +7,7 @@
           "Path": "{**catch-all}"
         },
         "Transforms": [
-          { "RequestHeader": "TEST-ID", "Set": "1234" }
+          { "RequestHeader": "X-Custom-Header", "Set": "my-value" }
         ]
       }
     },
@@ -15,7 +15,7 @@
       "upstream": {
         "Destinations": {
           "default": {
-            "Address": "http://backend:8080"
+            "Address": "http://backend:3000"
           }
         }
       }

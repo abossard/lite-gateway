@@ -15,7 +15,8 @@
 **/target/
 **/*.rs.bk
 
-# Local cert/test artifacts
-certs/generated/
+# Local artifacts
+archive/certs/generated/
+archive/artifacts/
 .run-logs/
 .temp/

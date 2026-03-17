@@ -1,78 +1,43 @@
-# Example: Mounted YARP Configuration for Header Injection
-#
-# This file shows how to configure header injection via the mounted
-# /config/yarp.json file. Mount this into the container to override
-# the baked-in defaults without rebuilding the image.
-#
-# ─────────────────────────────────────────────────────────
-# Example 1: Single header injection
-# ─────────────────────────────────────────────────────────
-#
-# config/yarp.json:
-# {
-#   "ReverseProxy": {
-#     "Routes": {
-#       "catch-all": {
-#         "Transforms": [
-#           { "RequestHeader": "TEST-ID", "Set": "1234" }
-#         ]
-#       }
-#     },
-#     "Clusters": {
-#       "upstream": {
-#         "Destinations": {
-#           "default": { "Address": "http://backend:8080" }
-#         }
-#       }
-#     }
-#   }
-# }
-#
-# ─────────────────────────────────────────────────────────
-# Example 2: Multiple headers
-# ─────────────────────────────────────────────────────────
-#
-# "Transforms": [
-#   { "RequestHeader": "TEST-ID", "Set": "1234" },
-#   { "RequestHeader": "X-Tenant-ID", "Set": "tenant-abc" },
-#   { "RequestHeader": "X-Source", "Append": "yarp-gateway" }
-# ]
-#
-# ─────────────────────────────────────────────────────────
-# Example 3: Via environment variables (no config file needed)
-# ─────────────────────────────────────────────────────────
-#
-# docker run \
-#   -e ReverseProxy__Routes__catch-all__Transforms__0__RequestHeader=TEST-ID \
-#   -e ReverseProxy__Routes__catch-all__Transforms__0__Set=1234 \
-#   yarp-proxy
-#
-# ─────────────────────────────────────────────────────────
-# Example 4: Via PROXY_HEADER_* env vars (entrypoint script)
-# ─────────────────────────────────────────────────────────
-#
-# docker run \
-#   -e PROXY_HEADER_TEST_ID=1234 \
-#   -e PROXY_HEADER_X_CORRELATION_ID=abc-123 \
-#   yarp-proxy
-#
-# This translates to headers:
-#   TEST-ID: 1234
-#   X-CORRELATION-ID: abc-123
-#
-# ─────────────────────────────────────────────────────────
-# Dynamic ENV var name scenario
-# ─────────────────────────────────────────────────────────
-#
-# External system provides: TEST_123_ID=1234
-# In docker-compose.yml, map it to the standard name:
-#
-#   environment:
-#     PROXY_HEADER_TEST_ID: "${TEST_123_ID}"
-#
-# Later when the external var changes to TEST_456_ID:
-#
-#   environment:
-#     PROXY_HEADER_TEST_ID: "${TEST_456_ID}"
-#
-# The Docker image and YARP config stay identical.
+# Example YARP Configuration
+
+This directory contains the example `yarp.json` mounted into the Docker container
+as `/app/config.json`. It demonstrates header forwarding — the core use case of
+Lite Gateway.
+
+## How it works
+
+The `yarp.json` file configures a catch-all route that:
+1. Matches every incoming request (`{**catch-all}`)
+2. Injects `X-Custom-Header: my-value` via a request transform
+3. Forwards to the backend cluster
+
+## Configuration approaches
+
+### 1. Mounted config file (this approach)
+
+```bash
+docker compose up --build
+# yarp.json is mounted as /app/config.json
+```
+
+### 2. Environment variables (YARP native)
+
+```bash
+docker run \
+  -e ReverseProxy__Clusters__upstream__Destinations__default__Address=http://backend:3000 \
+  -e ReverseProxy__Routes__catch-all__Transforms__0__RequestHeader=X-Custom-Header \
+  -e ReverseProxy__Routes__catch-all__Transforms__0__Set=my-value \
+  -p 8080:8080 lite-gateway
+```
+
+### 3. `PROXY_HEADER_*` shorthand
+
+```bash
+docker run \
+  -e PROXY_HEADER_X_CUSTOM_HEADER=my-value \
+  -e ReverseProxy__Clusters__upstream__Destinations__default__Address=http://backend:3000 \
+  -p 8080:8080 lite-gateway
+```
+
+Underscores in the env var name become hyphens in the header:
+`PROXY_HEADER_X_CUSTOM_HEADER` → `X-Custom-Header: my-value`
