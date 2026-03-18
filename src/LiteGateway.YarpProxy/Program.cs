@@ -66,61 +66,122 @@ for (var i = 0; i < args.Length; i++)
 var configFileFound = File.Exists(configPath);
 
 // ── Translate PROXY_HEADER_* env vars → YARP transform env vars ─────────────
-// Supports action prefixes: SET_, APPEND_, REMOVE_, RESPONSE_SET_, RESPONSE_APPEND_
-// Bare names (no prefix) default to request header Set for backward compatibility.
-var headerMappings = new List<(string EnvVar, string Action, string Direction, string HeaderName, string Value)>();
+// Syntax: PROXY_HEADER_[ACTION_]<HEADER_NAME>[_V]=<value>
+//
+// Actions: SET_ (default), APPEND_, REMOVE_, RESPONSE_SET_, RESPONSE_APPEND_
+// _V suffix: value is the NAME of another env var to read from
+//
+// Examples:
+//   PROXY_HEADER_X_TENANT_ID=customer-42            → Set request X-Tenant-ID: "customer-42"
+//   PROXY_HEADER_SET_X_API_KEY_V=SECRET_KEY          → Set request X-Api-Key: value of $SECRET_KEY
+//   PROXY_HEADER_RESPONSE_SET_X_VERSION_V=APP_VER    → Set response X-Version: value of $APP_VER
+//   PROXY_HEADER_REMOVE_X_INTERNAL=                  → Remove request X-Internal
+
+var headerMappings = new List<(string EnvVar, string Action, string Direction, string HeaderName, string Value, string? SourceEnv)>();
+var headerErrors = new List<string>();
 var idx = 0;
+
 foreach (var entry in Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
              .Where(e => ((string)e.Key).StartsWith("PROXY_HEADER_", StringComparison.Ordinal))
              .OrderBy(e => (string)e.Key))
 {
-    var raw = ((string)entry.Key)["PROXY_HEADER_".Length..];
-    var value = (string?)entry.Value ?? "";
-    var prefix = $"ReverseProxy__Routes__catch-all__Transforms__{idx}__";
+    var envKey = (string)entry.Key;
+    var envValue = (string?)entry.Value ?? "";
+    var raw = envKey["PROXY_HEADER_".Length..];
 
+    // ── Detect _V suffix (value-from-env-var) ───────────────────────────
+    string? sourceEnv = null;
+    bool isRef = raw.EndsWith("_V", StringComparison.Ordinal) && raw.Length > 2;
+    if (isRef)
+    {
+        raw = raw[..^2]; // strip _V
+        sourceEnv = envValue;
+        if (string.IsNullOrEmpty(sourceEnv))
+        {
+            headerErrors.Add($"  ❌ {envKey}: _V suffix requires a non-empty env var name as value");
+            continue;
+        }
+        var resolved = Environment.GetEnvironmentVariable(sourceEnv);
+        if (resolved is null)
+        {
+            headerErrors.Add($"  ❌ {envKey}: references ${sourceEnv} but that env var is not set");
+            continue;
+        }
+        envValue = resolved;
+    }
+
+    // ── Parse action prefix ─────────────────────────────────────────────
     string action, direction, headerName;
+    var prefix = $"ReverseProxy__Routes__catch-all__Transforms__{idx}__";
 
     if (raw.StartsWith("RESPONSE_APPEND_", StringComparison.Ordinal))
     {
-        headerName = raw["RESPONSE_APPEND_".Length..].Replace('_', '-');
+        headerName = raw["RESPONSE_APPEND_".Length..];
         action = "Append"; direction = "response";
-        Environment.SetEnvironmentVariable(prefix + "ResponseHeader", headerName);
-        Environment.SetEnvironmentVariable(prefix + "Append", value);
-        Environment.SetEnvironmentVariable(prefix + "When", "Always");
     }
     else if (raw.StartsWith("RESPONSE_SET_", StringComparison.Ordinal))
     {
-        headerName = raw["RESPONSE_SET_".Length..].Replace('_', '-');
+        headerName = raw["RESPONSE_SET_".Length..];
         action = "Set"; direction = "response";
-        Environment.SetEnvironmentVariable(prefix + "ResponseHeader", headerName);
-        Environment.SetEnvironmentVariable(prefix + "Set", value);
-        Environment.SetEnvironmentVariable(prefix + "When", "Always");
     }
     else if (raw.StartsWith("APPEND_", StringComparison.Ordinal))
     {
-        headerName = raw["APPEND_".Length..].Replace('_', '-');
+        headerName = raw["APPEND_".Length..];
         action = "Append"; direction = "request";
-        Environment.SetEnvironmentVariable(prefix + "RequestHeader", headerName);
-        Environment.SetEnvironmentVariable(prefix + "Append", value);
     }
     else if (raw.StartsWith("REMOVE_", StringComparison.Ordinal))
     {
-        headerName = raw["REMOVE_".Length..].Replace('_', '-');
+        headerName = raw["REMOVE_".Length..];
         action = "Remove"; direction = "request";
-        Environment.SetEnvironmentVariable(prefix + "RequestHeaderRemove", headerName);
+    }
+    else if (raw.StartsWith("SET_", StringComparison.Ordinal))
+    {
+        headerName = raw["SET_".Length..];
+        action = "Set"; direction = "request";
     }
     else
     {
-        // SET_ prefix or bare name → request header Set (backward compatible)
-        headerName = raw.StartsWith("SET_", StringComparison.Ordinal)
-            ? raw["SET_".Length..].Replace('_', '-')
-            : raw.Replace('_', '-');
+        // Bare name → request header Set (backward compatible)
+        headerName = raw;
         action = "Set"; direction = "request";
-        Environment.SetEnvironmentVariable(prefix + "RequestHeader", headerName);
-        Environment.SetEnvironmentVariable(prefix + "Set", value);
     }
 
-    headerMappings.Add(((string)entry.Key, action, direction, headerName, value));
+    // ── Validate header name ────────────────────────────────────────────
+    if (string.IsNullOrEmpty(headerName))
+    {
+        headerErrors.Add($"  ❌ {envKey}: header name is empty after parsing (check your env var name)");
+        continue;
+    }
+
+    headerName = headerName.Replace('_', '-');
+
+    // ── Apply YARP transform env vars ───────────────────────────────────
+    switch (action)
+    {
+        case "Set" when direction == "response":
+            Environment.SetEnvironmentVariable(prefix + "ResponseHeader", headerName);
+            Environment.SetEnvironmentVariable(prefix + "Set", envValue);
+            Environment.SetEnvironmentVariable(prefix + "When", "Always");
+            break;
+        case "Append" when direction == "response":
+            Environment.SetEnvironmentVariable(prefix + "ResponseHeader", headerName);
+            Environment.SetEnvironmentVariable(prefix + "Append", envValue);
+            Environment.SetEnvironmentVariable(prefix + "When", "Always");
+            break;
+        case "Set":
+            Environment.SetEnvironmentVariable(prefix + "RequestHeader", headerName);
+            Environment.SetEnvironmentVariable(prefix + "Set", envValue);
+            break;
+        case "Append":
+            Environment.SetEnvironmentVariable(prefix + "RequestHeader", headerName);
+            Environment.SetEnvironmentVariable(prefix + "Append", envValue);
+            break;
+        case "Remove":
+            Environment.SetEnvironmentVariable(prefix + "RequestHeaderRemove", headerName);
+            break;
+    }
+
+    headerMappings.Add((envKey, action, direction, headerName, envValue, sourceEnv));
     idx++;
 }
 
@@ -145,17 +206,31 @@ else
 if (headerMappings.Count > 0)
 {
     Console.WriteLine($"  ✅ PROXY_HEADER_* env vars ({headerMappings.Count} detected):");
-    foreach (var (envVar, action, direction, header, value) in headerMappings)
+    foreach (var (envVar, action, direction, header, value, sourceEnv) in headerMappings)
     {
+        var from = sourceEnv is not null ? $" (from ${sourceEnv})" : "";
         var display = action == "Remove"
             ? $"{action} {direction} {header}"
-            : $"{action} {direction} {header}: {value}";
+            : $"{action} {direction} {header}: \"{value}\"{from}";
         Console.WriteLine($"       {envVar} → {display}");
     }
 }
 else
 {
     Console.WriteLine("  ℹ️  No PROXY_HEADER_* env vars detected");
+}
+
+if (headerErrors.Count > 0)
+{
+    Console.WriteLine();
+    Console.WriteLine("  ╔════════════════════════════════════════════════════════╗");
+    Console.WriteLine("  ║  FATAL: PROXY_HEADER_* configuration errors           ║");
+    Console.WriteLine("  ╚════════════════════════════════════════════════════════╝");
+    foreach (var err in headerErrors)
+        Console.WriteLine(err);
+    Console.WriteLine();
+    Console.WriteLine("  Fix the env vars above and restart.");
+    Environment.Exit(1);
 }
 
 var upstreamEnv = yarpEnvVars

@@ -132,6 +132,26 @@ in the name become hyphens. An optional **action prefix** controls behavior:
 | `RESPONSE_SET_` | Set | Response | `PROXY_HEADER_RESPONSE_SET_X_VIA=lite-gw` |
 | `RESPONSE_APPEND_` | Append | Response | `PROXY_HEADER_RESPONSE_APPEND_X_TRACE=hop` |
 
+### `_V` suffix — value from another env var
+
+Add `_V` to the end of any `PROXY_HEADER_*` env var to read the header value from
+**another environment variable**. This is useful for injecting secrets or values managed
+by your orchestrator (Kubernetes, Docker Compose, Azure, etc.):
+
+```bash
+# The value of X-Api-Key is read from $MY_API_SECRET at startup
+export MY_API_SECRET="sk-abc123"
+export PROXY_HEADER_X_API_KEY_V=MY_API_SECRET    # → Set X-Api-Key: "sk-abc123"
+
+# Works with all action prefixes
+export PROXY_HEADER_SET_X_AUTH_V=AUTH_TOKEN        # → Set X-Auth: value of $AUTH_TOKEN
+export PROXY_HEADER_RESPONSE_SET_X_VER_V=APP_VER  # → Set response X-Ver: value of $APP_VER
+```
+
+If the referenced env var is not set, the proxy **crashes with a clear error** at startup.
+
+### Examples
+
 ```bash
 # Set request headers (backward compatible — no prefix needed)
 export PROXY_HEADER_X_TENANT_ID="customer-42"       # → Set X-Tenant-ID: customer-42
@@ -146,6 +166,9 @@ export PROXY_HEADER_REMOVE_X_INTERNAL_SECRET=         # → Remove X-Internal-Se
 # Set/append response headers
 export PROXY_HEADER_RESPONSE_SET_X_POWERED_BY="lite-gateway"
 export PROXY_HEADER_RESPONSE_APPEND_X_TRACE="proxy-hop"
+
+# Resolve from another env var
+export PROXY_HEADER_X_API_KEY_V=AZURE_API_KEY         # → Set X-Api-Key: value of $AZURE_API_KEY
 ```
 
 Or use native YARP env vars for full control:

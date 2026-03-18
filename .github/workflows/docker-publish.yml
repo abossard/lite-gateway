@@ -53,15 +53,17 @@ jobs:
             -e PORT=3000 \
             ealen/echo-server:0.9.2
 
-          # Gateway with all 6 header action types configured
+          # Gateway with all header action types + _V suffix configured
           docker run -d --name gateway --network test-net \
             -p 8080:8080 \
+            -e MY_SECRET_TOKEN=resolved-secret-value \
             -e PROXY_HEADER_X_TENANT_ID=customer-42 \
             -e PROXY_HEADER_SET_X_GATEWAY=lite-gw \
             -e PROXY_HEADER_APPEND_X_REQUEST_TAG=from-proxy \
             -e PROXY_HEADER_REMOVE_X_REMOVE_ME=true \
             -e PROXY_HEADER_RESPONSE_SET_X_POWERED_BY=lite-gateway \
             -e PROXY_HEADER_RESPONSE_APPEND_X_TRACE=proxy-hop \
+            -e PROXY_HEADER_X_FROM_ENV_V=MY_SECRET_TOKEN \
             -e "ReverseProxy__Clusters__upstream__Destinations__default__Address=http://echo-backend:3000" \
             ${{ env.TEST_IMAGE }}:test
 
@@ -139,6 +141,24 @@ jobs:
           echo "x-tenant-id=$TENANT  x-gateway=$GW"
           [ "$TENANT" = "customer-42" ] && [ "$GW" = "lite-gw" ] || { echo "FAIL"; exit 1; }
           echo "✅ PASS: all request headers coexist"
+
+      - name: "Test — _V suffix resolves env var"
+        run: |
+          HEADER=$(curl -sf http://localhost:8080/ | jq -r '.request.headers["x-from-env"]')
+          echo "x-from-env = $HEADER"
+          [ "$HEADER" = "resolved-secret-value" ] || { echo "FAIL: expected resolved-secret-value, got $HEADER"; exit 1; }
+          echo "✅ PASS: _V suffix resolved env var"
+
+      - name: "Test — _V with missing ref crashes"
+        run: |
+          docker run --rm \
+            -e PROXY_HEADER_X_BAD_V=NONEXISTENT_VAR \
+            -e "ReverseProxy__Clusters__upstream__Destinations__default__Address=http://echo-backend:3000" \
+            --network test-net \
+            ${{ env.TEST_IMAGE }}:test 2>&1 | tee /tmp/crash_output || true
+          grep -q "FATAL" /tmp/crash_output || { echo "FAIL: expected FATAL error"; exit 1; }
+          grep -q "NONEXISTENT_VAR" /tmp/crash_output || { echo "FAIL: error should mention NONEXISTENT_VAR"; exit 1; }
+          echo "✅ PASS: _V with missing ref crashes with clear error"
 
       # ── Cleanup ────────────────────────────────────────────────────────
       - name: Cleanup

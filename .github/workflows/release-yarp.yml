@@ -201,12 +201,14 @@ jobs:
       - name: Start gateway
         run: |
           export ASPNETCORE_URLS=http://+:8080
+          export MY_SECRET_TOKEN=resolved-secret-value
           export PROXY_HEADER_X_TENANT_ID=customer-42
           export PROXY_HEADER_SET_X_GATEWAY=lite-gw
           export PROXY_HEADER_APPEND_X_REQUEST_TAG=from-proxy
           export PROXY_HEADER_REMOVE_X_REMOVE_ME=true
           export PROXY_HEADER_RESPONSE_SET_X_POWERED_BY=lite-gateway
           export PROXY_HEADER_RESPONSE_APPEND_X_TRACE=proxy-hop
+          export PROXY_HEADER_X_FROM_ENV_V=MY_SECRET_TOKEN
           export ReverseProxy__Clusters__upstream__Destinations__default__Address=http://localhost:3000
 
           ./LiteGateway.YarpProxy &
@@ -266,6 +268,12 @@ jobs:
           GW=$(echo "$RESPONSE" | jq -r '.request.headers["x-gateway"]')
           [ "$TENANT" = "customer-42" ] && [ "$GW" = "lite-gw" ] || { echo "FAIL: tenant=$TENANT gw=$GW"; exit 1; }
           echo "✅ coexist: x-tenant-id=$TENANT x-gateway=$GW"
+
+      - name: "Test: _V suffix resolves env var"
+        run: |
+          HEADER=$(curl -sf http://localhost:8080/ | jq -r '.request.headers["x-from-env"]')
+          [ "$HEADER" = "resolved-secret-value" ] || { echo "FAIL: expected resolved-secret-value, got $HEADER"; exit 1; }
+          echo "✅ _V suffix: x-from-env=$HEADER"
 
   # ───────────────────────────────────────────────────────────────────────────
   # Release Job — collects all artifacts and creates a GitHub Release
