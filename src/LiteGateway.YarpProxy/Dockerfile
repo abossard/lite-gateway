@@ -32,6 +32,7 @@ LABEL org.opencontainers.image.description="Lite Gateway — YARP Reverse Proxy 
 LABEL org.opencontainers.image.licenses=MIT
 
 COPY --from=build /app/publish/LiteGateway.YarpProxy ./LiteGateway.YarpProxy
+COPY --from=build /app/publish/appsettings.json ./appsettings.json
 
 ENV ASPNETCORE_URLS=http://+:8080
 
