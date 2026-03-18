@@ -2,8 +2,7 @@
 
 [![Docker Build & Test](https://github.com/abossard/lite-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/abossard/lite-gateway/actions/workflows/docker-publish.yml)
 [![Release](https://github.com/abossard/lite-gateway/actions/workflows/release-yarp.yml/badge.svg)](https://github.com/abossard/lite-gateway/actions/workflows/release-yarp.yml)
-[![GHCR Image](https://ghcr-badge.egpl.dev/abossard/lite-gateway/latest_tag?trim=major&label=ghcr.io)](https://github.com/abossard/lite-gateway/pkgs/container/lite-gateway)
-[![Image Size](https://ghcr-badge.egpl.dev/abossard/lite-gateway/size)](https://github.com/abossard/lite-gateway/pkgs/container/lite-gateway)
+[![Docker Image](https://img.shields.io/badge/ghcr.io-abossard%2Flite--gateway-blue?logo=docker&logoColor=white)](https://github.com/abossard/lite-gateway/pkgs/container/lite-gateway)
 ![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)
 ![YARP](https://img.shields.io/badge/YARP-2.3.0-blue)
 ![Native AOT](https://img.shields.io/badge/Native_AOT-✓-brightgreen)
