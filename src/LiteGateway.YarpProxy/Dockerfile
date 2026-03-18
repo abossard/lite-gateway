@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # ============================================================================
 # Stage 1: Build — Native AOT publish for linux-x64
 # ============================================================================
@@ -29,10 +27,13 @@ RUN dotnet publish src/LiteGateway.YarpProxy/LiteGateway.YarpProxy.csproj \
 FROM mcr.microsoft.com/dotnet/runtime-deps:10.0-noble-chiseled AS runtime
 WORKDIR /app
 
+LABEL org.opencontainers.image.source=https://github.com/abossard/lite-gateway
+LABEL org.opencontainers.image.description="Lite Gateway — YARP Reverse Proxy with Native AOT"
+LABEL org.opencontainers.image.licenses=MIT
+
 COPY --from=build /app/publish/LiteGateway.YarpProxy ./LiteGateway.YarpProxy
 
-ENV DOTNET_EnableDiagnostics=0 \
-    ASPNETCORE_URLS=http://+:8080
+ENV ASPNETCORE_URLS=http://+:8080
 
 EXPOSE 8080
 

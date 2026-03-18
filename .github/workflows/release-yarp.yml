@@ -1,8 +1,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # YARP Proxy — Multi-Platform Native AOT Release
 #
-# Builds self-contained AOT binaries for 6 targets and attaches them to a
-# GitHub Release. Triggered on version tags (v*) or manually.
+# Jobs:
+#   1. build:   Build AOT binaries for 6 targets (matrix)
+#   2. test:    Run integration tests with linux-x64 binary + echo server
+#   3. release: Collect artifacts and create GitHub Release (only after tests pass)
+#
+# Triggered on version tags (v*) or manually.
 #
 # Matrix:
 #   linux-x64, linux-arm64, win-x64, win-arm64, osx-x64, osx-arm64
@@ -166,11 +170,110 @@ jobs:
           retention-days: 5
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Test Job — downloads the linux-x64 binary, runs it against echo server,
+  # and verifies all 6 header action types end-to-end.
+  # ───────────────────────────────────────────────────────────────────────────
+  test:
+    name: Integration Tests
+    needs: build
+    runs-on: ubuntu-latest
+
+    services:
+      echo-backend:
+        image: ealen/echo-server:0.9.2
+        env:
+          PORT: "3000"
+        ports:
+          - 3000:3000
+
+    steps:
+      - name: Download linux-x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: LiteGateway.YarpProxy-linux-x64
+
+      - name: Extract binary
+        run: |
+          tar xzf LiteGateway.YarpProxy-linux-x64.tar.gz
+          chmod +x LiteGateway.YarpProxy
+          ls -lh LiteGateway.YarpProxy
+
+      - name: Start gateway
+        run: |
+          export ASPNETCORE_URLS=http://+:8080
+          export PROXY_HEADER_X_TENANT_ID=customer-42
+          export PROXY_HEADER_SET_X_GATEWAY=lite-gw
+          export PROXY_HEADER_APPEND_X_REQUEST_TAG=from-proxy
+          export PROXY_HEADER_REMOVE_X_REMOVE_ME=true
+          export PROXY_HEADER_RESPONSE_SET_X_POWERED_BY=lite-gateway
+          export PROXY_HEADER_RESPONSE_APPEND_X_TRACE=proxy-hop
+          export ReverseProxy__Clusters__upstream__Destinations__default__Address=http://localhost:3000
+
+          ./LiteGateway.YarpProxy &
+
+          echo "Waiting for gateway..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/ > /dev/null 2>&1; then
+              echo "Gateway ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://localhost:8080/ > /dev/null || { echo "Gateway failed to start"; exit 1; }
+
+      - name: "Test: bare Set header (backward compat)"
+        run: |
+          RESPONSE=$(curl -sf http://localhost:8080/)
+          echo "$RESPONSE" | jq .
+          HEADER=$(echo "$RESPONSE" | jq -r '.request.headers["x-tenant-id"]')
+          [ "$HEADER" = "customer-42" ] || { echo "FAIL: expected customer-42, got $HEADER"; exit 1; }
+          echo "✅ bare Set: x-tenant-id=$HEADER"
+
+      - name: "Test: SET_ prefix header"
+        run: |
+          HEADER=$(curl -sf http://localhost:8080/ | jq -r '.request.headers["x-gateway"]')
+          [ "$HEADER" = "lite-gw" ] || { echo "FAIL: expected lite-gw, got $HEADER"; exit 1; }
+          echo "✅ SET_: x-gateway=$HEADER"
+
+      - name: "Test: APPEND_ prefix header"
+        run: |
+          HEADER=$(curl -sf -H "X-Request-Tag: original" http://localhost:8080/ | jq -r '.request.headers["x-request-tag"]')
+          echo "$HEADER" | grep -q "from-proxy" || { echo "FAIL: expected from-proxy in '$HEADER'"; exit 1; }
+          echo "✅ APPEND_: x-request-tag=$HEADER"
+
+      - name: "Test: REMOVE_ prefix header"
+        run: |
+          HEADER=$(curl -sf -H "X-Remove-Me: secret-value" http://localhost:8080/ | jq -r '.request.headers["x-remove-me"] // "REMOVED"')
+          [ "$HEADER" = "REMOVED" ] || { echo "FAIL: header should have been removed, got '$HEADER'"; exit 1; }
+          echo "✅ REMOVE_: header stripped"
+
+      - name: "Test: RESPONSE_SET_ prefix header"
+        run: |
+          HEADER=$(curl -sf -D- -o /dev/null http://localhost:8080/ | grep -i "x-powered-by" | tr -d '\r')
+          echo "$HEADER" | grep -qi "lite-gateway" || { echo "FAIL: x-powered-by not in response headers"; exit 1; }
+          echo "✅ RESPONSE_SET_: $HEADER"
+
+      - name: "Test: RESPONSE_APPEND_ prefix header"
+        run: |
+          HEADER=$(curl -sf -D- -o /dev/null http://localhost:8080/ | grep -i "x-trace" | tr -d '\r')
+          echo "$HEADER" | grep -qi "proxy-hop" || { echo "FAIL: x-trace not in response headers"; exit 1; }
+          echo "✅ RESPONSE_APPEND_: $HEADER"
+
+      - name: "Test: multiple headers coexist"
+        run: |
+          RESPONSE=$(curl -sf http://localhost:8080/)
+          TENANT=$(echo "$RESPONSE" | jq -r '.request.headers["x-tenant-id"]')
+          GW=$(echo "$RESPONSE" | jq -r '.request.headers["x-gateway"]')
+          [ "$TENANT" = "customer-42" ] && [ "$GW" = "lite-gw" ] || { echo "FAIL: tenant=$TENANT gw=$GW"; exit 1; }
+          echo "✅ coexist: x-tenant-id=$TENANT x-gateway=$GW"
+
+  # ───────────────────────────────────────────────────────────────────────────
   # Release Job — collects all artifacts and creates a GitHub Release
+  # (only runs after tests pass)
   # ───────────────────────────────────────────────────────────────────────────
   release:
     name: Create Release
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.tag != ''
 

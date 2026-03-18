@@ -1,5 +1,14 @@
 # Lite Gateway
 
+[![Docker Build & Test](https://github.com/abossard/lite-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/abossard/lite-gateway/actions/workflows/docker-publish.yml)
+[![Release](https://github.com/abossard/lite-gateway/actions/workflows/release-yarp.yml/badge.svg)](https://github.com/abossard/lite-gateway/actions/workflows/release-yarp.yml)
+[![GHCR Image](https://ghcr-badge.egpl.dev/abossard/lite-gateway/latest_tag?trim=major&label=ghcr.io)](https://github.com/abossard/lite-gateway/pkgs/container/lite-gateway)
+[![Image Size](https://ghcr-badge.egpl.dev/abossard/lite-gateway/size)](https://github.com/abossard/lite-gateway/pkgs/container/lite-gateway)
+![.NET](https://img.shields.io/badge/.NET-10.0-512BD4?logo=dotnet&logoColor=white)
+![YARP](https://img.shields.io/badge/YARP-2.3.0-blue)
+![Native AOT](https://img.shields.io/badge/Native_AOT-✓-brightgreen)
+![Platform](https://img.shields.io/badge/platform-linux%20%7C%20windows%20%7C%20macOS-lightgrey)
+
 A lightweight reverse proxy built on [YARP](https://microsoft.github.io/reverse-proxy/)
 that forwards a specific HTTP header on every request. Built with .NET 10 and Native AOT
 for a single-file, zero-dependency binary.
@@ -44,7 +53,16 @@ dotnet run --project src/LiteGateway.YarpProxy
 The proxy starts on `http://localhost:8080` and reads `config.json` from the working
 directory (or use `--config /path/to/config.json`).
 
-### Option C: Download a prebuilt binary
+### Option C: Pull from GitHub Container Registry
+
+```bash
+docker pull ghcr.io/abossard/lite-gateway:latest
+docker run -v ./config.json:/app/config.json:ro -p 8080:8080 ghcr.io/abossard/lite-gateway:latest
+```
+
+Multi-arch image (linux/amd64 + linux/arm64). Version tags follow semver: `:1`, `:1.2`, `:1.2.3`, `:latest`.
+
+### Option D: Download a prebuilt binary
 
 | Platform | Download |
 | --- | --- |
@@ -102,12 +120,32 @@ reaches the backend.
 
 ### Via environment variables
 
-Set headers without a config file using the `PROXY_HEADER_*` shorthand — underscores
-become hyphens in the header name:
+Set headers without a config file using the `PROXY_HEADER_*` shorthand. Underscores
+in the name become hyphens. An optional **action prefix** controls behavior:
+
+| Prefix | Action | Direction | Example |
+| --- | --- | --- | --- |
+| *(none)* | Set | Request | `PROXY_HEADER_X_TENANT_ID=val` |
+| `SET_` | Set | Request | `PROXY_HEADER_SET_X_TENANT_ID=val` |
+| `APPEND_` | Append | Request | `PROXY_HEADER_APPEND_X_TAG=from-proxy` |
+| `REMOVE_` | Remove | Request | `PROXY_HEADER_REMOVE_X_SECRET=` |
+| `RESPONSE_SET_` | Set | Response | `PROXY_HEADER_RESPONSE_SET_X_VIA=lite-gw` |
+| `RESPONSE_APPEND_` | Append | Response | `PROXY_HEADER_RESPONSE_APPEND_X_TRACE=hop` |
 
 ```bash
-export PROXY_HEADER_X_TENANT_ID="customer-42"   # → X-Tenant-ID: customer-42
-export PROXY_HEADER_X_CUSTOM="hello"             # → X-Custom: hello
+# Set request headers (backward compatible — no prefix needed)
+export PROXY_HEADER_X_TENANT_ID="customer-42"       # → Set X-Tenant-ID: customer-42
+export PROXY_HEADER_SET_X_GATEWAY="lite-gw"          # → Set X-Gateway: lite-gw
+
+# Append to existing request header
+export PROXY_HEADER_APPEND_X_REQUEST_TAG="from-proxy" # → Append X-Request-Tag: from-proxy
+
+# Remove a request header (strip before forwarding)
+export PROXY_HEADER_REMOVE_X_INTERNAL_SECRET=         # → Remove X-Internal-Secret
+
+# Set/append response headers
+export PROXY_HEADER_RESPONSE_SET_X_POWERED_BY="lite-gateway"
+export PROXY_HEADER_RESPONSE_APPEND_X_TRACE="proxy-hop"
 ```
 
 Or use native YARP env vars for full control:
@@ -182,6 +220,142 @@ The proxy loads config from these sources (highest priority wins):
 
 ---
 
+## Performance Tuning
+
+All performance parameters are configurable via `GATEWAY_*` environment variables. Defaults
+are tuned for high-throughput proxy workloads. The startup banner shows every parameter with
+its current value and whether it's `(default)` or `(custom)`.
+
+### Kestrel (inbound connections)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GATEWAY_MAX_CONNECTIONS` | `20000` | Max concurrent inbound connections |
+| `GATEWAY_MAX_UPGRADED_CONNECTIONS` | `20000` | Max concurrent WebSocket/upgraded connections |
+| `GATEWAY_KEEPALIVE_TIMEOUT_SEC` | `120` | Keep-alive timeout (seconds) |
+| `GATEWAY_REQUEST_HEADER_TIMEOUT_SEC` | `30` | Max time to receive request headers (seconds) |
+| `GATEWAY_H2_MAX_STREAMS` | `1024` | HTTP/2 max concurrent streams per connection |
+| `GATEWAY_H2_INIT_CONNECTION_WINDOW_KB` | `1024` | HTTP/2 initial connection flow-control window (KB) |
+| `GATEWAY_H2_INIT_STREAM_WINDOW_KB` | `768` | HTTP/2 initial per-stream flow-control window (KB) |
+
+### HttpClient (outbound connections)
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GATEWAY_POOL_LIFETIME_SEC` | `300` | Rotate pooled connections after N seconds (picks up DNS changes) |
+| `GATEWAY_POOL_IDLE_TIMEOUT_SEC` | `120` | Close idle connections after N seconds |
+| `GATEWAY_ENABLE_MULTI_HTTP2` | `true` | Open additional HTTP/2 connections when stream limit is hit |
+
+### Middleware
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GATEWAY_COMPRESSION` | `false` | Enable Brotli + Gzip response compression |
+
+### Thread pool
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `GATEWAY_MIN_THREADS` | *(not set)* | Pre-allocate min worker/IO threads (avoids ramp-up delay under burst) |
+
+### Docker example
+
+```bash
+docker run \
+  -v ./config.json:/app/config.json:ro \
+  -e GATEWAY_KEEPALIVE_TIMEOUT_SEC=180 \
+  -e GATEWAY_POOL_LIFETIME_SEC=600 \
+  -e GATEWAY_COMPRESSION=true \
+  -e GATEWAY_MIN_THREADS=200 \
+  -p 8080:8080 lite-gateway
+```
+
+### Docker Compose with kernel tuning
+
+```yaml
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.YarpProxy/Dockerfile
+    environment:
+      GATEWAY_COMPRESSION: "true"
+      GATEWAY_MIN_THREADS: "200"
+    ports:
+      - "8080:8080"
+    sysctls:
+      net.core.somaxconn: "65535"
+      net.ipv4.ip_local_port_range: "1024 65535"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+```
+
+---
+
+## OpenTelemetry
+
+The proxy has built-in OpenTelemetry support for **traces**, **metrics**, and **logs**.
+It is entirely opt-in — set `OTEL_EXPORTER_OTLP_ENDPOINT` to enable export to any
+OTLP-compatible collector (Jaeger, Grafana Tempo, Azure Monitor, etc.).
+
+### Signals exported
+
+| Signal | What's captured |
+| --- | --- |
+| **Traces** | Inbound HTTP requests (ASP.NET Core), outbound forwarded requests (HttpClient), YARP proxy pipeline (`Yarp.ReverseProxy`) |
+| **Metrics** | Request duration, active connections, request/response sizes, HTTP client connection pool stats |
+| **Logs** | All application logs (with scopes and formatted messages) |
+
+### Environment variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset — OTel disabled)* | OTLP collector endpoint (e.g., `http://collector:4317`) |
+| `OTEL_SERVICE_NAME` | `lite-gateway` | Service name in traces/metrics |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Protocol: `grpc` or `http/protobuf` |
+
+All standard `OTEL_*` env vars are supported — see the
+[OpenTelemetry spec](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/).
+
+### Docker example
+
+```bash
+docker run \
+  -v ./config.json:/app/config.json:ro \
+  -e OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
+  -e OTEL_SERVICE_NAME=my-gateway \
+  -p 8080:8080 lite-gateway
+```
+
+### Docker Compose with a collector
+
+```yaml
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.YarpProxy/Dockerfile
+    volumes:
+      - ./config/yarp.json:/app/config.json:ro
+    ports:
+      - "8080:8080"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: lite-gateway
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+```
+
+---
+
 ## Docker
 
 ```bash
@@ -204,6 +378,38 @@ docker run \
 | Shell | None |
 | User | Non-root |
 | Size | ~15–25 MB |
+
+### Official Microsoft YARP Docker Image
+
+Microsoft publishes a pre-built YARP container image. It is currently in **Preview**
+and only available in the nightly repository:
+
+```bash
+docker pull mcr.microsoft.com/dotnet/nightly/yarp:latest
+```
+
+The official image is a generic, config-driven reverse proxy — mount a JSON config file
+to `/etc/yarp.config` and it handles routing on port 5000:
+
+```bash
+docker run --rm \
+  -v $(pwd)/config.json:/etc/yarp.config \
+  -p 5000:5000 \
+  mcr.microsoft.com/dotnet/nightly/yarp:latest
+```
+
+It also supports OpenTelemetry via the `OTEL_EXPORTER_OTLP_ENDPOINT` environment
+variable.
+
+> **Why this project uses a custom image instead:** Lite Gateway compiles to a Native
+> AOT binary, which is smaller (~15 MB vs ~80 MB), starts faster, and supports the
+> `PROXY_HEADER_*` environment variable shorthand for header injection. The official
+> image doesn't support custom middleware or the env-var header convention.
+
+For more details see the
+[Docker Hub page](https://hub.docker.com/r/microsoft/dotnet-nightly-yarp) and the
+tracking issue for the stable release:
+[dotnet/dotnet-docker#6436](https://github.com/dotnet/dotnet-docker/issues/6436).
 
 ## Build from Source
 
@@ -243,4 +449,5 @@ archive/                      ← legacy benchmark code (see archive/README.md)
 - [YARP Documentation](https://microsoft.github.io/reverse-proxy/)
 - [YARP Config File Reference](https://microsoft.github.io/reverse-proxy/articles/config-files.html)
 - [YARP Request Transforms](https://microsoft.github.io/reverse-proxy/articles/transforms.html)
+- [Official YARP Docker Image (Preview)](https://hub.docker.com/r/microsoft/dotnet-nightly-yarp)
 - [Native AOT Deployment](https://learn.microsoft.com/dotnet/core/deploying/native-aot/)
