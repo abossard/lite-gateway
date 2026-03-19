@@ -160,11 +160,83 @@ jobs:
           grep -q "NONEXISTENT_VAR" /tmp/crash_output || { echo "FAIL: error should mention NONEXISTENT_VAR"; exit 1; }
           echo "✅ PASS: _V with missing ref crashes with clear error"
 
+      - name: "Test — mTLS with PEM cert + key"
+        run: |
+          # Generate self-signed CA + server + client certs
+          mkdir -p /tmp/certs
+          openssl req -x509 -newkey rsa:2048 -keyout /tmp/certs/ca.key -out /tmp/certs/ca.pem \
+            -days 1 -nodes -subj "/CN=Test-CA" 2>/dev/null
+          openssl req -newkey rsa:2048 -keyout /tmp/certs/server.key -out /tmp/certs/server.csr \
+            -nodes -subj "/CN=localhost" 2>/dev/null
+          openssl x509 -req -in /tmp/certs/server.csr -CA /tmp/certs/ca.pem -CAkey /tmp/certs/ca.key \
+            -CAcreateserial -out /tmp/certs/server.pem -days 1 \
+            -extfile <(echo "subjectAltName=DNS:mtls-backend,DNS:localhost") 2>/dev/null
+          openssl req -newkey rsa:2048 -keyout /tmp/certs/client.key -out /tmp/certs/client.csr \
+            -nodes -subj "/CN=lite-gateway-client" 2>/dev/null
+          openssl x509 -req -in /tmp/certs/client.csr -CA /tmp/certs/ca.pem -CAkey /tmp/certs/ca.key \
+            -CAcreateserial -out /tmp/certs/client.pem -days 1 2>/dev/null
+
+          # Start an HTTPS backend that requires client certs (mTLS)
+          docker run -d --name mtls-backend --network test-net \
+            -v /tmp/certs:/certs:ro \
+            python:3.12-slim bash -c '
+              pip install -q pyopenssl 2>/dev/null
+              python3 -c "
+          import ssl, json, socket
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          class H(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  peer = self.connection.getpeercert()
+                  cn = dict(x[0] for x in peer[\"subject\"])[\"commonName\"] if peer else \"NONE\"
+                  body = json.dumps({\"mtls_client_cn\": cn})
+                  self.send_response(200)
+                  self.send_header(\"Content-Type\", \"application/json\")
+                  self.end_headers()
+                  self.wfile.write(body.encode())
+              def log_message(self, *a): pass
+          ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          ctx.load_cert_chain(\"/certs/server.pem\", \"/certs/server.key\")
+          ctx.load_verify_locations(\"/certs/ca.pem\")
+          ctx.verify_mode = ssl.CERT_REQUIRED
+          srv = HTTPServer((\"0.0.0.0\", 443), H)
+          srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+          print(\"mTLS backend ready\", flush=True)
+          srv.serve_forever()
+          "'
+          sleep 5
+
+          # Start gateway with mTLS client cert
+          docker run -d --name mtls-gateway --network test-net \
+            -p 9090:8080 \
+            -v /tmp/certs:/certs:ro \
+            -e GATEWAY_UPSTREAM=https://mtls-backend:443 \
+            -e GATEWAY_TLS_CERT=/certs/client.pem \
+            -e GATEWAY_TLS_KEY=/certs/client.key \
+            -e GATEWAY_TLS_CA=/certs/ca.pem \
+            ${{ env.TEST_IMAGE }}:test
+
+          # Wait for gateway
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9090/ > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+
+          # Verify the backend saw the client cert
+          RESPONSE=$(curl -sf http://localhost:9090/)
+          echo "$RESPONSE"
+          CN=$(echo "$RESPONSE" | jq -r '.mtls_client_cn')
+          echo "Backend saw client CN: $CN"
+          [ "$CN" = "lite-gateway-client" ] || { echo "FAIL: expected lite-gateway-client"; docker logs mtls-gateway; exit 1; }
+          echo "✅ PASS: mTLS — backend received client cert CN=lite-gateway-client"
+
+          # Cleanup mTLS containers
+          docker rm -f mtls-gateway mtls-backend 2>/dev/null || true
+
       # ── Cleanup ────────────────────────────────────────────────────────
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f gateway echo-backend 2>/dev/null || true
+          docker rm -f gateway echo-backend mtls-gateway mtls-backend 2>/dev/null || true
           docker network rm test-net 2>/dev/null || true
 
   # ─────────────────────────────────────────────────────────────────────────
