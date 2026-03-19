@@ -1,13 +1,12 @@
 # =============================================================================
 # Lite Gateway — Docker Compose
 # =============================================================================
-# YARP reverse proxy that forwards requests to a backend and injects custom
-# HTTP headers. Uses an echo server as the demo backend so you can inspect
-# which headers arrive.
+# YARP reverse proxy with echo backend and Aspire Dashboard for live telemetry.
 #
 # Usage:
 #   docker compose up --build
 #   curl -s http://localhost:8080/ | jq .headers
+#   open http://localhost:18888   ← Aspire Dashboard (traces, metrics, logs)
 #
 # You should see the injected "X-Custom-Header" in the response.
 # =============================================================================
@@ -28,5 +27,18 @@ services:
       - ./config/yarp.json:/app/config.json:ro
     ports:
       - "8080:8080"
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
+      OTEL_SERVICE_NAME: "lite-gateway"
     depends_on:
       - backend
+      - aspire-dashboard
+
+  # ── Aspire Dashboard (traces, metrics, logs viewer) ─────────────────────
+  # Open http://localhost:18888 to see live telemetry from the gateway.
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    ports:
+      - "18888:18888"
+    environment:
+      DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
