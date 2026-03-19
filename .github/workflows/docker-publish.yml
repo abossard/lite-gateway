@@ -167,43 +167,53 @@ jobs:
           openssl req -x509 -newkey rsa:2048 -keyout /tmp/certs/ca.key -out /tmp/certs/ca.pem \
             -days 1 -nodes -subj "/CN=Test-CA" 2>/dev/null
           openssl req -newkey rsa:2048 -keyout /tmp/certs/server.key -out /tmp/certs/server.csr \
-            -nodes -subj "/CN=localhost" 2>/dev/null
+            -nodes -subj "/CN=mtls-backend" 2>/dev/null
           openssl x509 -req -in /tmp/certs/server.csr -CA /tmp/certs/ca.pem -CAkey /tmp/certs/ca.key \
             -CAcreateserial -out /tmp/certs/server.pem -days 1 \
-            -extfile <(echo "subjectAltName=DNS:mtls-backend,DNS:localhost") 2>/dev/null
+            -extfile <(echo "subjectAltName=DNS:mtls-backend") 2>/dev/null
           openssl req -newkey rsa:2048 -keyout /tmp/certs/client.key -out /tmp/certs/client.csr \
             -nodes -subj "/CN=lite-gateway-client" 2>/dev/null
           openssl x509 -req -in /tmp/certs/client.csr -CA /tmp/certs/ca.pem -CAkey /tmp/certs/ca.key \
             -CAcreateserial -out /tmp/certs/client.pem -days 1 2>/dev/null
 
-          # Start an HTTPS backend that requires client certs (mTLS)
-          docker run -d --name mtls-backend --network test-net \
-            -v /tmp/certs:/certs:ro \
-            python:3.12-slim bash -c '
-              pip install -q pyopenssl 2>/dev/null
-              python3 -c "
-          import ssl, json, socket
+          # Write a standalone mTLS backend script (no pip install needed)
+          cat > /tmp/certs/mtls_backend.py << 'PYEOF'
+          import ssl, json
           from http.server import HTTPServer, BaseHTTPRequestHandler
           class H(BaseHTTPRequestHandler):
               def do_GET(self):
                   peer = self.connection.getpeercert()
-                  cn = dict(x[0] for x in peer[\"subject\"])[\"commonName\"] if peer else \"NONE\"
-                  body = json.dumps({\"mtls_client_cn\": cn})
+                  cn = dict(x[0] for x in peer["subject"])["commonName"] if peer else "NONE"
+                  body = json.dumps({"mtls_client_cn": cn})
                   self.send_response(200)
-                  self.send_header(\"Content-Type\", \"application/json\")
+                  self.send_header("Content-Type", "application/json")
                   self.end_headers()
                   self.wfile.write(body.encode())
               def log_message(self, *a): pass
           ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-          ctx.load_cert_chain(\"/certs/server.pem\", \"/certs/server.key\")
-          ctx.load_verify_locations(\"/certs/ca.pem\")
+          ctx.load_cert_chain("/certs/server.pem", "/certs/server.key")
+          ctx.load_verify_locations("/certs/ca.pem")
           ctx.verify_mode = ssl.CERT_REQUIRED
-          srv = HTTPServer((\"0.0.0.0\", 443), H)
+          srv = HTTPServer(("0.0.0.0", 443), H)
           srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-          print(\"mTLS backend ready\", flush=True)
+          print("mTLS backend ready on :443", flush=True)
           srv.serve_forever()
-          "'
-          sleep 5
+          PYEOF
+
+          # Start mTLS backend using python:3.12-slim with pre-baked script
+          docker run -d --name mtls-backend --network test-net \
+            -v /tmp/certs:/certs:ro \
+            python:3.12-slim python3 /certs/mtls_backend.py
+
+          # Wait for backend to be ready
+          echo "Waiting for mTLS backend..."
+          for i in $(seq 1 30); do
+            if docker logs mtls-backend 2>&1 | grep -q "mTLS backend ready"; then
+              echo "mTLS backend ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
 
           # Start gateway with mTLS client cert
           docker run -d --name mtls-gateway --network test-net \
@@ -216,17 +226,27 @@ jobs:
             ${{ env.TEST_IMAGE }}:test
 
           # Wait for gateway
+          echo "Waiting for gateway..."
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:9090/ > /dev/null 2>&1; then break; fi
+            if curl -sf http://localhost:9090/ > /dev/null 2>&1; then
+              echo "Gateway ready after ${i}s"
+              break
+            fi
             sleep 1
           done
 
+          # Show logs for debugging
+          echo "--- mtls-backend logs ---"
+          docker logs mtls-backend 2>&1 | tail -5
+          echo "--- mtls-gateway logs ---"
+          docker logs mtls-gateway 2>&1 | tail -20
+
           # Verify the backend saw the client cert
-          RESPONSE=$(curl -sf http://localhost:9090/)
-          echo "$RESPONSE"
+          RESPONSE=$(curl -sf http://localhost:9090/ || echo '{"mtls_client_cn":"CURL_FAILED"}')
+          echo "Response: $RESPONSE"
           CN=$(echo "$RESPONSE" | jq -r '.mtls_client_cn')
           echo "Backend saw client CN: $CN"
-          [ "$CN" = "lite-gateway-client" ] || { echo "FAIL: expected lite-gateway-client"; docker logs mtls-gateway; exit 1; }
+          [ "$CN" = "lite-gateway-client" ] || { echo "FAIL: expected lite-gateway-client, got $CN"; docker logs mtls-gateway; exit 1; }
           echo "✅ PASS: mTLS — backend received client cert CN=lite-gateway-client"
 
           # Cleanup mTLS containers
