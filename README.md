@@ -282,7 +282,7 @@ services:
   gateway:
     image: ghcr.io/abossard/lite-gateway:latest
     ports:
-      - "443:8080"
+      - "8080:8080"
     environment:
       # Backend
       ReverseProxy__Clusters__upstream__Destinations__default__Address: "http://app:3000"
@@ -295,12 +295,27 @@ services:
       # Advanced (native YARP env vars)
       ReverseProxy__Clusters__upstream__HealthCheck__Active__Enabled: "true"
       ReverseProxy__Clusters__upstream__HealthCheck__Active__Path: "/health"
+      # OpenTelemetry → Aspire Dashboard
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
+      OTEL_SERVICE_NAME: "lite-gateway"
     depends_on:
       - app
+      - aspire-dashboard
 
   app:
     image: my-backend:latest
+
+  # ── Aspire Dashboard (traces, metrics, logs viewer) ─────────────────────
+  # Open http://localhost:18888 to see live telemetry from the gateway.
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:latest
+    ports:
+      - "18888:18888"     # Dashboard UI
+    environment:
+      DOTNET_DASHBOARD_UNSECURED_ALLOW_ANONYMOUS: "true"
 ```
+
+Open **http://localhost:18888** to see live traces, metrics, and logs from the gateway.
 
 ---
 
