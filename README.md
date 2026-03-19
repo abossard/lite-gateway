@@ -179,9 +179,78 @@ export ReverseProxy__Routes__catch-all__Transforms__0__Set="my-value"
 export ReverseProxy__Clusters__upstream__Destinations__default__Address="http://backend:3000"
 ```
 
----
+### Common recipes
 
-## Configuration
+#### Set the upstream (origin) backend
+
+```bash
+# Via env var (simplest)
+export ReverseProxy__Clusters__upstream__Destinations__default__Address="https://api.internal:443"
+
+# Or in config.json
+# { "ReverseProxy": { "Clusters": { "upstream": { "Destinations": { "default": { "Address": "https://api.internal:443" }}}}}}
+```
+
+#### Set the Host header sent to the backend
+
+By default YARP forwards the original `Host` header from the client. To override it
+(e.g., when the backend requires a specific hostname):
+
+```bash
+# Replace Host with a fixed value
+export PROXY_HEADER_SET_HOST="api.internal.corp"
+
+# Or use YARP's built-in RequestHeaderOriginalHost transform (preserves original as X-Forwarded-Host)
+export ReverseProxy__Routes__catch-all__Transforms__0__RequestHeaderOriginalHost="true"
+```
+
+#### X-Forwarded-* headers (reverse proxy standard)
+
+YARP adds `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`, and
+`X-Forwarded-Prefix` by default. You can customize this behavior:
+
+```bash
+# Disable all X-Forwarded-* headers (if behind another proxy that already sets them)
+export ReverseProxy__Routes__catch-all__Transforms__0__X-Forwarded="Off"
+
+# Set specific headers with custom prefix
+export ReverseProxy__Routes__catch-all__Transforms__0__X-Forwarded="Set"
+export ReverseProxy__Routes__catch-all__Transforms__0__ForHeaderName="X-Real-IP"
+```
+
+Or in `config.json`:
+
+```json
+"Transforms": [
+  { "X-Forwarded": "Set" },
+  { "RequestHeaderOriginalHost": "true" },
+  { "RequestHeader": "X-Custom-Header", "Set": "my-value" }
+]
+```
+
+#### Complete Docker Compose example
+
+```yaml
+services:
+  gateway:
+    image: ghcr.io/abossard/lite-gateway:latest
+    ports:
+      - "443:8080"
+    environment:
+      # Backend
+      ReverseProxy__Clusters__upstream__Destinations__default__Address: "http://app:3000"
+      # Headers
+      PROXY_HEADER_SET_HOST: "app.internal"
+      PROXY_HEADER_X_GATEWAY: "lite-gateway"
+      PROXY_HEADER_X_TENANT_ID_V: AZURE_TENANT_ID    # from another env var
+      PROXY_HEADER_REMOVE_X_DEBUG: ""                  # strip debug header
+      PROXY_HEADER_RESPONSE_SET_X_FRAME_OPTIONS: "DENY"
+    depends_on:
+      - app
+
+  app:
+    image: my-backend:latest
+```
 
 The proxy loads config from these sources (highest priority wins):
 
