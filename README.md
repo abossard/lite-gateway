@@ -171,13 +171,60 @@ export PROXY_HEADER_RESPONSE_APPEND_X_TRACE="proxy-hop"
 export PROXY_HEADER_X_API_KEY_V=AZURE_API_KEY         # → Set X-Api-Key: value of $AZURE_API_KEY
 ```
 
-Or use native YARP env vars for full control:
+### How it works: `PROXY_HEADER_*` is a shorthand for native YARP env vars
+
+**Everything in lite-gateway is configurable via environment variables.** The entire
+YARP configuration (routes, clusters, transforms, health checks, load balancing) can be
+set using the `ReverseProxy__` double-underscore convention — this is standard .NET
+configuration binding, not a lite-gateway feature.
+
+`PROXY_HEADER_*` is a **convenience layer** that generates the verbose YARP env vars
+for you at startup. Here's what each shorthand expands to:
+
+| `PROXY_HEADER_*` shorthand | Generated native YARP env vars |
+| --- | --- |
+| `PROXY_HEADER_X_TENANT_ID=val` | `ReverseProxy__Routes__catch-all__Transforms__0__RequestHeader=X-TENANT-ID`<br>`ReverseProxy__Routes__catch-all__Transforms__0__Set=val` |
+| `PROXY_HEADER_APPEND_X_TAG=val` | `...Transforms__0__RequestHeader=X-TAG`<br>`...Transforms__0__Append=val` |
+| `PROXY_HEADER_REMOVE_X_SECRET=` | `...Transforms__0__RequestHeaderRemove=X-SECRET` |
+| `PROXY_HEADER_RESPONSE_SET_X_VIA=val` | `...Transforms__0__ResponseHeader=X-VIA`<br>`...Transforms__0__Set=val`<br>`...Transforms__0__When=Always` |
+
+**When to use which:**
+
+| Use case | Use `PROXY_HEADER_*` | Use `ReverseProxy__` |
+| --- | --- | --- |
+| Simple header injection | ✅ | Overkill |
+| Target a specific route (not catch-all) | ❌ | ✅ |
+| Path transforms, query rewrites | ❌ | ✅ |
+| Load balancing, health checks | ❌ | ✅ |
+| `When` condition (`Success`/`Failure`) | ❌ | ✅ |
+| Multiple routes with different transforms | ❌ | ✅ |
+
+**Native YARP env var examples** (these work without any `PROXY_HEADER_*`):
 
 ```bash
+# Set the upstream backend
+export ReverseProxy__Clusters__upstream__Destinations__default__Address="https://api.internal:443"
+
+# Add a header transform
 export ReverseProxy__Routes__catch-all__Transforms__0__RequestHeader="X-Custom-Header"
 export ReverseProxy__Routes__catch-all__Transforms__0__Set="my-value"
-export ReverseProxy__Clusters__upstream__Destinations__default__Address="http://backend:3000"
+
+# Strip a path prefix before forwarding
+export ReverseProxy__Routes__catch-all__Transforms__1__PathRemovePrefix="/api"
+
+# Add a second route targeting a different cluster
+export ReverseProxy__Routes__admin__ClusterId="admin-backend"
+export ReverseProxy__Routes__admin__Match__Path="/admin/{**catch-all}"
+export ReverseProxy__Clusters__admin-backend__Destinations__default__Address="http://admin:4000"
+
+# Enable active health checks
+export ReverseProxy__Clusters__upstream__HealthCheck__Active__Enabled="true"
+export ReverseProxy__Clusters__upstream__HealthCheck__Active__Interval="00:00:10"
+export ReverseProxy__Clusters__upstream__HealthCheck__Active__Path="/health"
 ```
+
+See the [YARP Configuration docs](https://learn.microsoft.com/aspnet/core/fundamentals/servers/yarp/config-files)
+for the full list of settings — every JSON path maps to a `__`-separated env var.
 
 ### Common recipes
 
@@ -239,12 +286,15 @@ services:
     environment:
       # Backend
       ReverseProxy__Clusters__upstream__Destinations__default__Address: "http://app:3000"
-      # Headers
+      # Headers (shorthand)
       PROXY_HEADER_SET_HOST: "app.internal"
       PROXY_HEADER_X_GATEWAY: "lite-gateway"
       PROXY_HEADER_X_TENANT_ID_V: AZURE_TENANT_ID    # from another env var
       PROXY_HEADER_REMOVE_X_DEBUG: ""                  # strip debug header
       PROXY_HEADER_RESPONSE_SET_X_FRAME_OPTIONS: "DENY"
+      # Advanced (native YARP env vars)
+      ReverseProxy__Clusters__upstream__HealthCheck__Active__Enabled: "true"
+      ReverseProxy__Clusters__upstream__HealthCheck__Active__Path: "/health"
     depends_on:
       - app
 
@@ -252,11 +302,15 @@ services:
     image: my-backend:latest
 ```
 
+---
+
+## Configuration
+
 The proxy loads config from these sources (highest priority wins):
 
 | Priority | Source | Hot-Reload |
 | :---: | --- | :---: |
-| 3 (highest) | Environment variables | ❌ |
+| 3 (highest) | Environment variables (`ReverseProxy__*`, `PROXY_HEADER_*`, `GATEWAY_*`) | ❌ |
 | 2 | Config JSON file (`--config` or `./config.json`) | ✅ |
 | 1 | Built-in `appsettings.json` defaults | — |
 
