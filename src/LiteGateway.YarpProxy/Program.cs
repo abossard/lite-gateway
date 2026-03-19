@@ -3,6 +3,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 using System.IO.Compression;
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.ResponseCompression;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
@@ -99,7 +101,79 @@ if (upstreamUrl is not null)
     }
 }
 
-// ── Parse --config argument ─────────────────────────────────────────────────
+// ── Parse GATEWAY_TLS_* for mTLS client certificate to backend ──────────────
+var tlsCertPath = Environment.GetEnvironmentVariable("GATEWAY_TLS_CERT");
+var tlsKeyPath = Environment.GetEnvironmentVariable("GATEWAY_TLS_KEY");
+var tlsCaPath = Environment.GetEnvironmentVariable("GATEWAY_TLS_CA");
+var tlsSkipVerify = EnvBool("GATEWAY_TLS_SKIP_VERIFY", false);
+
+// Resolve password (supports _V)
+string? tlsCertPassword = null;
+string? tlsCertPasswordSource = null;
+var tlsPasswordV = Environment.GetEnvironmentVariable("GATEWAY_TLS_CERT_PASSWORD_V");
+if (tlsPasswordV is not null)
+{
+    tlsCertPasswordSource = tlsPasswordV;
+    var resolved = Environment.GetEnvironmentVariable(tlsPasswordV);
+    if (resolved is null)
+        configErrors.Add($"  ❌ GATEWAY_TLS_CERT_PASSWORD_V={tlsPasswordV}: env var ${tlsPasswordV} is not set");
+    else
+        tlsCertPassword = resolved;
+}
+else
+{
+    tlsCertPassword = Environment.GetEnvironmentVariable("GATEWAY_TLS_CERT_PASSWORD");
+}
+
+// Load and validate the client certificate
+X509Certificate2? clientCert = null;
+if (tlsCertPath is not null)
+{
+    if (!File.Exists(tlsCertPath))
+    {
+        configErrors.Add($"  ❌ GATEWAY_TLS_CERT={tlsCertPath}: file not found");
+    }
+    else
+    {
+        try
+        {
+            if (tlsKeyPath is not null)
+            {
+                // PEM cert + separate key file
+                if (!File.Exists(tlsKeyPath))
+                {
+                    configErrors.Add($"  ❌ GATEWAY_TLS_KEY={tlsKeyPath}: file not found");
+                }
+                else
+                {
+                    clientCert = X509Certificate2.CreateFromPemFile(tlsCertPath, tlsKeyPath);
+                }
+            }
+            else
+            {
+                // PFX (with optional password)
+                clientCert = new X509Certificate2(tlsCertPath, tlsCertPassword);
+            }
+        }
+        catch (Exception ex)
+        {
+            configErrors.Add($"  ❌ GATEWAY_TLS_CERT={tlsCertPath}: failed to load — {ex.Message}");
+        }
+    }
+}
+
+// Validate CA file
+X509Certificate2? caCert = null;
+if (tlsCaPath is not null)
+{
+    if (!File.Exists(tlsCaPath))
+        configErrors.Add($"  ❌ GATEWAY_TLS_CA={tlsCaPath}: file not found");
+    else
+    {
+        try { caCert = X509CertificateLoader.LoadCertificateFromFile(tlsCaPath); }
+        catch (Exception ex) { configErrors.Add($"  ❌ GATEWAY_TLS_CA={tlsCaPath}: failed to load — {ex.Message}"); }
+    }
+}
 var configPath = Path.Combine(Directory.GetCurrentDirectory(), "config.json");
 for (var i = 0; i < args.Length; i++)
 {
@@ -302,6 +376,19 @@ if (debugMode)
 else if (logLevelOverride is not null)
     Console.WriteLine($"  📋 Log level   : {logLevelOverride}");
 
+// mTLS status
+if (clientCert is not null)
+{
+    var cn = clientCert.GetNameInfo(X509NameType.SimpleName, false);
+    var expiry = clientCert.NotAfter.ToString("yyyy-MM-dd");
+    var pwdFrom = tlsCertPasswordSource is not null ? $", password from ${tlsCertPasswordSource}" : "";
+    Console.WriteLine($"  🔒 mTLS cert   : {tlsCertPath} (CN={cn}, expires {expiry}{pwdFrom})");
+}
+if (caCert is not null)
+    Console.WriteLine($"  🔒 Custom CA   : {tlsCaPath}");
+if (tlsSkipVerify)
+    Console.WriteLine("  ⚠️  TLS SKIP VERIFY: backend certificate validation DISABLED (dev only!)");
+
 // Show native YARP env vars (non-transform, non-upstream)
 var yarpDisplay = yarpEnvVars
     .Where(e => !e.Item1.Contains("Transforms") &&
@@ -396,6 +483,29 @@ builder.Services.AddReverseProxy()
         handler.PooledConnectionLifetime = TimeSpan.FromSeconds(poolLifetimeSec);
         handler.PooledConnectionIdleTimeout = TimeSpan.FromSeconds(poolIdleTimeoutSec);
         handler.EnableMultipleHttp2Connections = enableMultiHttp2;
+
+        // mTLS: present client certificate to backend
+        if (clientCert is not null)
+        {
+            handler.SslOptions.ClientCertificates = new X509CertificateCollection { clientCert };
+        }
+
+        // Custom CA: trust a self-signed backend certificate
+        if (caCert is not null || tlsSkipVerify)
+        {
+            handler.SslOptions.RemoteCertificateValidationCallback = (_, cert, chain, errors) =>
+            {
+                if (tlsSkipVerify) return true;
+                if (errors == SslPolicyErrors.None) return true;
+                if (caCert is not null && chain is not null)
+                {
+                    chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                    chain.ChainPolicy.CustomTrustStore.Add(caCert);
+                    return chain.Build(new X509Certificate2(cert!));
+                }
+                return false;
+            };
+        }
     });
 
 // ── Optional response compression ──────────────────────────────────────────

@@ -335,6 +335,51 @@ Everything is configurable via environment variables — no config files require
 | `PROXY_HEADER_<NAME>` | Set a request header | `PROXY_HEADER_X_TENANT_ID=val` |
 | `PROXY_HEADER_<NAME>_V` | Set a header from another env var | `PROXY_HEADER_X_KEY_V=SECRET` |
 
+### mTLS — client certificate to backend
+
+Present a client certificate when connecting to an HTTPS backend (mutual TLS):
+
+| Variable | Purpose | Example |
+| --- | --- | --- |
+| `GATEWAY_TLS_CERT` | Path to PFX or PEM client cert | `/certs/client.pfx` |
+| `GATEWAY_TLS_CERT_PASSWORD` | PFX password | `my-password` |
+| `GATEWAY_TLS_CERT_PASSWORD_V` | PFX password from another env var | `CERT_SECRET` |
+| `GATEWAY_TLS_KEY` | Path to PEM private key (if cert is PEM) | `/certs/client.key` |
+| `GATEWAY_TLS_CA` | Custom CA bundle (for self-signed backends) | `/certs/ca.pem` |
+| `GATEWAY_TLS_SKIP_VERIFY` | Skip backend cert validation (dev only!) | `true` |
+
+```bash
+# mTLS with PFX certificate
+docker run \
+  -e GATEWAY_UPSTREAM=https://secure-backend:443 \
+  -e GATEWAY_TLS_CERT=/certs/client.pfx \
+  -e GATEWAY_TLS_CERT_PASSWORD_V=PFX_SECRET \
+  -e PFX_SECRET=my-password \
+  -v ./certs:/certs:ro \
+  -p 8080:8080 ghcr.io/abossard/lite-gateway:latest
+
+# mTLS with PEM cert + key
+docker run \
+  -e GATEWAY_UPSTREAM=https://secure-backend:443 \
+  -e GATEWAY_TLS_CERT=/certs/client.pem \
+  -e GATEWAY_TLS_KEY=/certs/client.key \
+  -v ./certs:/certs:ro \
+  -p 8080:8080 ghcr.io/abossard/lite-gateway:latest
+
+# Self-signed backend with custom CA
+docker run \
+  -e GATEWAY_UPSTREAM=https://internal:443 \
+  -e GATEWAY_TLS_CA=/certs/ca.pem \
+  -v ./certs:/certs:ro \
+  -p 8080:8080 ghcr.io/abossard/lite-gateway:latest
+```
+
+The startup banner shows cert details:
+```
+🔒 mTLS cert   : /certs/client.pfx (CN=lite-gateway, expires 2027-01-15)
+🔒 Custom CA   : /certs/ca.pem
+```
+
 Minimal working example — just two env vars:
 
 ```bash
