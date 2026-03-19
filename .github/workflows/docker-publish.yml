@@ -53,10 +53,11 @@ jobs:
             -e PORT=3000 \
             ealen/echo-server:0.9.2
 
-          # Gateway with all header action types + _V suffix configured
+          # Gateway with all header action types + _V suffix + GATEWAY_UPSTREAM
           docker run -d --name gateway --network test-net \
             -p 8080:8080 \
             -e MY_SECRET_TOKEN=resolved-secret-value \
+            -e GATEWAY_UPSTREAM=http://echo-backend:3000 \
             -e PROXY_HEADER_X_TENANT_ID=customer-42 \
             -e PROXY_HEADER_SET_X_GATEWAY=lite-gw \
             -e PROXY_HEADER_APPEND_X_REQUEST_TAG=from-proxy \
@@ -64,7 +65,6 @@ jobs:
             -e PROXY_HEADER_RESPONSE_SET_X_POWERED_BY=lite-gateway \
             -e PROXY_HEADER_RESPONSE_APPEND_X_TRACE=proxy-hop \
             -e PROXY_HEADER_X_FROM_ENV_V=MY_SECRET_TOKEN \
-            -e "ReverseProxy__Clusters__upstream__Destinations__default__Address=http://echo-backend:3000" \
             ${{ env.TEST_IMAGE }}:test
 
           # Wait for services to be ready

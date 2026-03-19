@@ -321,7 +321,29 @@ Open **http://localhost:18888** to see live traces, metrics, and logs from the g
 
 ## Configuration
 
-The proxy loads config from these sources (highest priority wins):
+Everything is configurable via environment variables — no config files required.
+
+### Essential env vars
+
+| Variable | Purpose | Example |
+| --- | --- | --- |
+| `GATEWAY_UPSTREAM` | Backend URL to forward to | `http://backend:3000` |
+| `GATEWAY_UPSTREAM_V` | Read backend URL from another env var | `BACKEND_URL` |
+| `GATEWAY_DEBUG` | Verbose logging + per-request diagnostics | `true` |
+| `GATEWAY_LOG_LEVEL` | Override log level directly | `Debug`, `Information`, `Warning` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Enable OpenTelemetry export | `http://collector:4317` |
+| `PROXY_HEADER_<NAME>` | Set a request header | `PROXY_HEADER_X_TENANT_ID=val` |
+| `PROXY_HEADER_<NAME>_V` | Set a header from another env var | `PROXY_HEADER_X_KEY_V=SECRET` |
+
+Minimal working example — just two env vars:
+
+```bash
+docker run -e GATEWAY_UPSTREAM=http://backend:3000 \
+           -e PROXY_HEADER_X_TENANT_ID=acme \
+           -p 8080:8080 ghcr.io/abossard/lite-gateway:latest
+```
+
+### Config sources (highest priority wins)
 
 | Priority | Source | Hot-Reload |
 | :---: | --- | :---: |

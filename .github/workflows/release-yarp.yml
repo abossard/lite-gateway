@@ -202,6 +202,7 @@ jobs:
         run: |
           export ASPNETCORE_URLS=http://+:8080
           export MY_SECRET_TOKEN=resolved-secret-value
+          export GATEWAY_UPSTREAM=http://localhost:3000
           export PROXY_HEADER_X_TENANT_ID=customer-42
           export PROXY_HEADER_SET_X_GATEWAY=lite-gw
           export PROXY_HEADER_APPEND_X_REQUEST_TAG=from-proxy
@@ -209,7 +210,6 @@ jobs:
           export PROXY_HEADER_RESPONSE_SET_X_POWERED_BY=lite-gateway
           export PROXY_HEADER_RESPONSE_APPEND_X_TRACE=proxy-hop
           export PROXY_HEADER_X_FROM_ENV_V=MY_SECRET_TOKEN
-          export ReverseProxy__Clusters__upstream__Destinations__default__Address=http://localhost:3000
 
           ./LiteGateway.YarpProxy &
 

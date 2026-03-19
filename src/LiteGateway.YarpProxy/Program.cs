@@ -52,6 +52,53 @@ var compressionEnabled        = EnvBool("GATEWAY_COMPRESSION", false);
 // Thread pool
 var minThreads                = EnvIntOptional("GATEWAY_MIN_THREADS");
 
+// ── Simplified config vars ──────────────────────────────────────────────────
+// GATEWAY_UPSTREAM / GATEWAY_UPSTREAM_V — sets the backend URL
+// GATEWAY_DEBUG — toggle verbose logging
+// GATEWAY_LOG_LEVEL — override log level directly
+var configErrors = new List<string>();
+
+var debugMode = EnvBool("GATEWAY_DEBUG", false);
+var logLevelOverride = Environment.GetEnvironmentVariable("GATEWAY_LOG_LEVEL");
+
+// Resolve upstream URL
+string? upstreamUrl = null;
+string? upstreamSource = null;
+var upstreamV = Environment.GetEnvironmentVariable("GATEWAY_UPSTREAM_V");
+var upstreamDirect = Environment.GetEnvironmentVariable("GATEWAY_UPSTREAM");
+
+if (upstreamV is not null)
+{
+    upstreamSource = upstreamV;
+    var resolved = Environment.GetEnvironmentVariable(upstreamV);
+    if (resolved is null)
+    {
+        configErrors.Add($"  ❌ GATEWAY_UPSTREAM_V={upstreamV}: env var ${upstreamV} is not set");
+    }
+    else
+    {
+        upstreamUrl = resolved;
+    }
+}
+else if (upstreamDirect is not null)
+{
+    upstreamUrl = upstreamDirect;
+}
+
+if (upstreamUrl is not null)
+{
+    if (!Uri.TryCreate(upstreamUrl, UriKind.Absolute, out var uri) ||
+        (uri.Scheme != "http" && uri.Scheme != "https"))
+    {
+        configErrors.Add($"  ❌ GATEWAY_UPSTREAM={upstreamUrl}: not a valid http(s) URL");
+    }
+    else
+    {
+        Environment.SetEnvironmentVariable(
+            "ReverseProxy__Clusters__upstream__Destinations__default__Address", upstreamUrl);
+    }
+}
+
 // ── Parse --config argument ─────────────────────────────────────────────────
 var configPath = Path.Combine(Directory.GetCurrentDirectory(), "config.json");
 for (var i = 0; i < args.Length; i++)
@@ -198,6 +245,13 @@ Console.WriteLine("║           Lite Gateway — YARP Reverse Proxy            
 Console.WriteLine("╚══════════════════════════════════════════════════════════════╝");
 Console.WriteLine();
 
+// Upstream
+if (upstreamUrl is not null)
+{
+    var src = upstreamSource is not null ? $" (from ${upstreamSource})" : "";
+    Console.WriteLine($"  🔗 Upstream    : {upstreamUrl}{src}");
+}
+
 if (configFileFound)
     Console.WriteLine($"  ✅ Config file : {configPath}");
 else
@@ -220,6 +274,7 @@ else
     Console.WriteLine("  ℹ️  No PROXY_HEADER_* env vars detected");
 }
 
+// Fail fast on header parsing errors
 if (headerErrors.Count > 0)
 {
     Console.WriteLine();
@@ -233,21 +288,6 @@ if (headerErrors.Count > 0)
     Environment.Exit(1);
 }
 
-var upstreamEnv = yarpEnvVars
-    .FirstOrDefault(e => e.Item1.Contains("Destinations") && e.Item1.Contains("Address"));
-if (upstreamEnv != default)
-    Console.WriteLine($"  ✅ Upstream (env) : {upstreamEnv.Item2}");
-
-var otherYarpVars = yarpEnvVars
-    .Where(e => !e.Item1.Contains("Transforms") && e != upstreamEnv)
-    .ToList();
-if (otherYarpVars.Count > 0)
-{
-    Console.WriteLine($"  ✅ YARP env vars ({otherYarpVars.Count} additional):");
-    foreach (var (key, val) in otherYarpVars)
-        Console.WriteLine($"       {key} = {val}");
-}
-
 var listenUrl = Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "http://localhost:8080";
 Console.WriteLine($"  🌐 Listen URL  : {listenUrl}");
 
@@ -256,6 +296,23 @@ if (!string.IsNullOrEmpty(otelEndpoint))
     Console.WriteLine($"  📡 OpenTelemetry: {otelEndpoint}");
 else
     Console.WriteLine("  ℹ️  OpenTelemetry: disabled (set OTEL_EXPORTER_OTLP_ENDPOINT to enable)");
+
+if (debugMode)
+    Console.WriteLine("  🐛 Debug       : ON (verbose logging, per-request diagnostics)");
+else if (logLevelOverride is not null)
+    Console.WriteLine($"  📋 Log level   : {logLevelOverride}");
+
+// Show native YARP env vars (non-transform, non-upstream)
+var yarpDisplay = yarpEnvVars
+    .Where(e => !e.Item1.Contains("Transforms") &&
+                !(e.Item1.Contains("Destinations") && e.Item1.Contains("Address")))
+    .ToList();
+if (yarpDisplay.Count > 0)
+{
+    Console.WriteLine($"  ✅ YARP env vars ({yarpDisplay.Count} additional):");
+    foreach (var (key, val) in yarpDisplay)
+        Console.WriteLine($"       {key} = {val}");
+}
 
 Console.WriteLine();
 Console.WriteLine("  ⚡ Performance Tuning");
@@ -297,8 +354,25 @@ var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 if (configFileFound)
     builder.Configuration.AddJsonFile(configPath, optional: false, reloadOnChange: true);
 
-builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.None);
-builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
+// ── Logging — respect GATEWAY_DEBUG and GATEWAY_LOG_LEVEL ───────────────────
+if (debugMode)
+{
+    builder.Logging.SetMinimumLevel(LogLevel.Debug);
+    builder.Logging.AddFilter("Yarp", LogLevel.Debug);
+    builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Information);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Information);
+}
+else if (logLevelOverride is not null && Enum.TryParse<LogLevel>(logLevelOverride, true, out var parsedLevel))
+{
+    builder.Logging.SetMinimumLevel(parsedLevel);
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics",
+        parsedLevel <= LogLevel.Information ? LogLevel.Information : LogLevel.None);
+}
+else
+{
+    builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.None);
+    builder.Logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Warning);
+}
 
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -366,35 +440,83 @@ if (!string.IsNullOrEmpty(otelEndpoint))
 
 var app = builder.Build();
 
-// ── Post-build validation warnings ──────────────────────────────────────────
+// ── Hard config validation ──────────────────────────────────────────────────
 var reverseProxySection = app.Configuration.GetSection("ReverseProxy");
 var clusters = reverseProxySection.GetSection("Clusters");
 var routes = reverseProxySection.GetSection("Routes");
+var routeCount = 0;
+var clusterCount = 0;
 
-if (!clusters.GetChildren().Any())
-    Console.WriteLine("  ⚠️  WARNING: No clusters configured — proxy has no upstream destinations!");
-else
+// Validate clusters
+var clusterNames = new HashSet<string>();
+foreach (var cluster in clusters.GetChildren())
 {
-    foreach (var cluster in clusters.GetChildren())
+    clusterNames.Add(cluster.Key);
+    clusterCount++;
+    var destinations = cluster.GetSection("Destinations");
+    if (!destinations.GetChildren().Any())
     {
-        var destinations = cluster.GetSection("Destinations");
-        foreach (var dest in destinations.GetChildren())
-        {
-            var address = dest["Address"];
-            if (string.IsNullOrEmpty(address))
-                Console.WriteLine($"  ⚠️  WARNING: Cluster '{cluster.Key}' destination '{dest.Key}' has no address!");
-            else if (address.Contains("localhost:5000"))
-                Console.WriteLine($"  ⚠️  WARNING: Cluster '{cluster.Key}' → {address} (default — did you forget to set the upstream?)");
-        }
+        configErrors.Add($"  ❌ Cluster '{cluster.Key}': no destinations defined");
+        continue;
+    }
+    foreach (var dest in destinations.GetChildren())
+    {
+        var address = dest["Address"];
+        if (string.IsNullOrEmpty(address))
+            configErrors.Add($"  ❌ Cluster '{cluster.Key}' → destination '{dest.Key}': Address is empty");
     }
 }
 
-if (!routes.GetChildren().Any())
-    Console.WriteLine("  ⚠️  WARNING: No routes configured — proxy won't match any requests!");
+// Validate routes
+foreach (var route in routes.GetChildren())
+{
+    routeCount++;
+    var path = route.GetSection("Match")["Path"];
+    var hosts = route.GetSection("Match").GetSection("Hosts").GetChildren().ToList();
+    if (string.IsNullOrEmpty(path) && hosts.Count == 0)
+        configErrors.Add($"  ❌ Route '{route.Key}': requires Path or Hosts in Match");
 
-if (!configFileFound && headerMappings.Count == 0 && yarpEnvVars.Count == 0)
-    Console.WriteLine("  ⚠️  WARNING: No config file and no YARP env vars — using built-in defaults only.");
+    var clusterId = route["ClusterId"];
+    if (string.IsNullOrEmpty(clusterId))
+        configErrors.Add($"  ❌ Route '{route.Key}': missing ClusterId");
+    else if (!clusterNames.Contains(clusterId))
+        configErrors.Add($"  ❌ Route '{route.Key}': references cluster '{clusterId}' which does not exist");
+}
 
+if (routeCount == 0)
+    configErrors.Add("  ❌ No routes configured — proxy won't match any requests");
+if (clusterCount == 0)
+    configErrors.Add("  ❌ No clusters configured — proxy has no upstream destinations");
+
+// Check for likely typos in ReverseProxy__ env vars
+var knownTopLevel = new[] { "Routes", "Clusters" };
+foreach (var (key, _) in yarpEnvVars)
+{
+    var parts = key.Split("__");
+    if (parts.Length >= 2)
+    {
+        var section = parts[1];
+        if (!knownTopLevel.Contains(section))
+            configErrors.Add($"  ⚠️  {key}: '{section}' is not a known YARP section (expected Routes or Clusters)");
+    }
+}
+
+// Print validation result
+if (configErrors.Count > 0)
+{
+    Console.WriteLine("  ╔════════════════════════════════════════════════════════╗");
+    Console.WriteLine("  ║  FATAL: Configuration errors                          ║");
+    Console.WriteLine("  ╚════════════════════════════════════════════════════════╝");
+    foreach (var err in configErrors)
+        Console.WriteLine(err);
+    Console.WriteLine();
+    Console.WriteLine("  📖 YARP docs: https://learn.microsoft.com/aspnet/core/fundamentals/servers/yarp");
+    Console.WriteLine("  Fix the errors above and restart.");
+    Environment.Exit(1);
+}
+
+Console.WriteLine($"  ✅ Config valid : {routeCount} route(s), {clusterCount} cluster(s)");
+Console.WriteLine("  📖 YARP docs   : https://learn.microsoft.com/aspnet/core/fundamentals/servers/yarp");
 Console.WriteLine();
 
 if (compressionEnabled)
