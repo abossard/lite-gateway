@@ -1,0 +1,270 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Benchmark — Load Test Matrix with Report
+#
+# Builds the Docker image once, then runs a matrix of load tests with
+# different GATEWAY_* tuning settings. Results are aggregated into a
+# Markdown report posted to the GitHub Actions job summary.
+#
+# Trigger: manual (workflow_dispatch) or on PRs touching src/
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Benchmark
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: "Test duration per scenario (seconds)"
+        required: false
+        default: "15"
+        type: string
+  pull_request:
+    branches: [main]
+    paths: ["src/**"]
+
+env:
+  TEST_IMAGE: lite-gateway-bench
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 1: Build Docker image once
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ env.TEST_IMAGE }}:bench \
+            -f src/LiteGateway.YarpProxy/Dockerfile .
+          docker save ${{ env.TEST_IMAGE }}:bench | gzip > /tmp/image.tar.gz
+
+      - name: Upload image
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-image
+          path: /tmp/image.tar.gz
+          retention-days: 1
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 2: Run load tests (matrix)
+  # ─────────────────────────────────────────────────────────────────────────
+  benchmark:
+    name: "bench: c=${{ matrix.concurrency }} comp=${{ matrix.compression }} threads=${{ matrix.min_threads }}"
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        concurrency: [50, 200, 500]
+        compression: ["off", "on"]
+        min_threads: ["default", "200"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image
+        uses: actions/download-artifact@v4
+        with:
+          name: bench-image
+          path: /tmp
+
+      - name: Load image
+        run: gunzip -c /tmp/image.tar.gz | docker load
+
+      - name: Install hey
+        run: |
+          curl -sf -L https://hey-release.s3.us-east-2.amazonaws.com/hey_linux_amd64 -o /usr/local/bin/hey
+          chmod +x /usr/local/bin/hey
+          hey -h 2>&1 | head -1
+
+      - name: Start test stack
+        run: |
+          docker network create bench-net
+
+          # Echo backend
+          docker run -d --name backend --network bench-net \
+            -e PORT=3000 ealen/echo-server:0.9.2
+
+          # Build gateway env vars
+          GATEWAY_ENV="-e GATEWAY_UPSTREAM=http://backend:3000"
+          if [ "${{ matrix.compression }}" = "on" ]; then
+            GATEWAY_ENV="$GATEWAY_ENV -e GATEWAY_COMPRESSION=true"
+          fi
+          if [ "${{ matrix.min_threads }}" != "default" ]; then
+            GATEWAY_ENV="$GATEWAY_ENV -e GATEWAY_MIN_THREADS=${{ matrix.min_threads }}"
+          fi
+
+          docker run -d --name gateway --network bench-net \
+            -p 8080:8080 \
+            $GATEWAY_ENV \
+            ${{ env.TEST_IMAGE }}:bench
+
+          # Wait for gateway
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/ > /dev/null 2>&1; then
+              echo "Gateway ready after ${i}s"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Gateway failed to start"
+              docker logs gateway
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Show gateway config
+        run: docker logs gateway 2>&1 | head -40
+
+      - name: Run benchmark
+        run: |
+          DURATION="${{ github.event.inputs.duration || '15' }}"
+          echo "Running: hey -z ${DURATION}s -c ${{ matrix.concurrency }} http://localhost:8080/"
+
+          hey -z "${DURATION}s" \
+              -c ${{ matrix.concurrency }} \
+              -o csv \
+              http://localhost:8080/ > /tmp/raw.csv
+
+          # Also capture summary text
+          hey -z "${DURATION}s" \
+              -c ${{ matrix.concurrency }} \
+              http://localhost:8080/ > /tmp/summary.txt 2>&1
+
+          cat /tmp/summary.txt
+
+      - name: Extract metrics
+        run: |
+          # Parse CSV: columns are response-time, dns, dial, tls, connect, request-write, response-wait, status-code, offset
+          # Calculate RPS, avg latency, p99 latency, errors from the CSV
+          python3 << 'PYEOF'
+          import csv, json, statistics
+
+          rows = []
+          with open('/tmp/raw.csv') as f:
+              reader = csv.DictReader(f)
+              for row in reader:
+                  rows.append(row)
+
+          if not rows:
+              print("No data!")
+              exit(1)
+
+          latencies = [float(r['response-time']) for r in rows]
+          statuses = [int(r['status-code']) for r in rows]
+          offsets = [float(r['offset']) for r in rows]
+
+          total_requests = len(rows)
+          duration = max(offsets) - min(offsets) if len(offsets) > 1 else 1.0
+          rps = total_requests / duration if duration > 0 else 0
+          avg_latency = statistics.mean(latencies) * 1000  # to ms
+          p50_latency = statistics.quantiles(latencies, n=100)[49] * 1000
+          p99_latency = statistics.quantiles(latencies, n=100)[98] * 1000
+          errors = sum(1 for s in statuses if s >= 400)
+
+          result = {
+              "concurrency": "${{ matrix.concurrency }}",
+              "compression": "${{ matrix.compression }}",
+              "min_threads": "${{ matrix.min_threads }}",
+              "total_requests": total_requests,
+              "rps": round(rps, 1),
+              "avg_latency_ms": round(avg_latency, 2),
+              "p50_latency_ms": round(p50_latency, 2),
+              "p99_latency_ms": round(p99_latency, 2),
+              "errors": errors
+          }
+
+          with open('/tmp/result.json', 'w') as f:
+              json.dump(result, f, indent=2)
+
+          print(json.dumps(result, indent=2))
+          PYEOF
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: "bench-c${{ matrix.concurrency }}-comp${{ matrix.compression }}-t${{ matrix.min_threads }}"
+          path: /tmp/result.json
+          retention-days: 1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f gateway backend 2>/dev/null || true
+          docker network rm bench-net 2>/dev/null || true
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Job 3: Aggregate results into a Markdown report
+  # ─────────────────────────────────────────────────────────────────────────
+  report:
+    name: Generate Report
+    needs: benchmark
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: ./results
+          pattern: bench-*
+          merge-multiple: false
+
+      - name: Generate Markdown report
+        run: |
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          # Collect all result files
+          results = []
+          for d in sorted(glob.glob('results/bench-*')):
+              for f in glob.glob(os.path.join(d, '*.json')):
+                  with open(f) as fh:
+                      results.append(json.load(fh))
+
+          # Sort by concurrency, then compression, then threads
+          results.sort(key=lambda r: (int(r['concurrency']), r['compression'], r['min_threads']))
+
+          # Generate markdown
+          lines = []
+          lines.append("## ⚡ Lite Gateway Benchmark Report\n")
+          lines.append(f"**Scenarios:** {len(results)} | **Tool:** hey | **Image:** Native AOT (distroless)\n")
+          lines.append("")
+          lines.append("| Concurrency | Compression | MinThreads | RPS | Avg (ms) | P50 (ms) | P99 (ms) | Requests | Errors |")
+          lines.append("|---|---|---|---|---|---|---|---|---|")
+
+          for r in results:
+              comp = "✅ Brotli+Gzip" if r['compression'] == 'on' else "—"
+              threads = r['min_threads'] if r['min_threads'] != 'default' else '—'
+              lines.append(
+                  f"| {r['concurrency']} | {comp} | {threads} "
+                  f"| **{r['rps']:,.1f}** | {r['avg_latency_ms']:.2f} | {r['p50_latency_ms']:.2f} "
+                  f"| {r['p99_latency_ms']:.2f} | {r['total_requests']:,} | {r['errors']} |"
+              )
+
+          lines.append("")
+          lines.append("### Key")
+          lines.append("- **RPS** = requests/second (higher is better)")
+          lines.append("- **Avg/P50/P99** = latency in milliseconds (lower is better)")
+          lines.append("- **MinThreads** = `GATEWAY_MIN_THREADS` setting (— = runtime default)")
+          lines.append("- **Compression** = `GATEWAY_COMPRESSION` (Brotli + Gzip)")
+          lines.append("")
+
+          report = "\n".join(lines)
+          print(report)
+
+          with open('benchmark-report.md', 'w') as f:
+              f.write(report)
+          PYEOF
+
+      - name: Post to job summary
+        run: cat benchmark-report.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: benchmark-report.md
+          retention-days: 30
