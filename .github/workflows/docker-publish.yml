@@ -181,6 +181,9 @@ jobs:
           openssl x509 -req -in /tmp/certs/client.csr -CA /tmp/certs/ca.pem -CAkey /tmp/certs/ca.key \
             -CAcreateserial -out /tmp/certs/client.pem -days 1 2>/dev/null
 
+          # Make all cert files readable by the non-root container user
+          chmod 644 /tmp/certs/*.pem /tmp/certs/*.key
+
           # Write a standalone mTLS backend script (no pip install needed)
           cat > /tmp/certs/mtls_backend.py << 'PYEOF'
           import ssl, json
