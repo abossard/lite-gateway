@@ -5,7 +5,7 @@
 #
 # Usage:
 #   docker compose up --build
-#   curl -s http://localhost:8080/ | jq .headers
+#   curl -s http://localhost:8080/ | jq .request.headers
 #   open http://localhost:18888   ← Aspire Dashboard (traces, metrics, logs)
 #
 # You should see the injected "X-Custom-Header" in the response.
