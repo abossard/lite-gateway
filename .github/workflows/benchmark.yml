@@ -227,19 +227,23 @@ jobs:
           # Sort by concurrency, then compression, then threads
           results.sort(key=lambda r: (int(r['concurrency']), r['compression'], r['min_threads']))
 
+          # Find the fastest row (highest RPS)
+          best_rps = max(r['rps'] for r in results) if results else 0
+
           # Generate markdown
           lines = []
           lines.append("## ⚡ Lite Gateway Benchmark Report\n")
           lines.append(f"**Scenarios:** {len(results)} | **Tool:** hey | **Image:** Native AOT (distroless)\n")
           lines.append("")
-          lines.append("| Concurrency | Compression | MinThreads | RPS | Avg (ms) | P50 (ms) | P99 (ms) | Requests | Errors |")
-          lines.append("|---|---|---|---|---|---|---|---|---|")
+          lines.append("| | Concurrency | Compression | MinThreads | RPS | Avg (ms) | P50 (ms) | P99 (ms) | Requests | Errors |")
+          lines.append("|---|---|---|---|---|---|---|---|---|---|")
 
           for r in results:
               comp = "✅ Brotli+Gzip" if r['compression'] == 'on' else "—"
               threads = r['min_threads'] if r['min_threads'] != 'default' else '—'
+              badge = "🏆" if r['rps'] == best_rps else ""
               lines.append(
-                  f"| {r['concurrency']} | {comp} | {threads} "
+                  f"| {badge} | {r['concurrency']} | {comp} | {threads} "
                   f"| **{r['rps']:,.1f}** | {r['avg_latency_ms']:.2f} | {r['p50_latency_ms']:.2f} "
                   f"| {r['p99_latency_ms']:.2f} | {r['total_requests']:,} | {r['errors']} |"
               )

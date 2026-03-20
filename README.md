@@ -1,5 +1,6 @@
 # Lite Gateway
 
+[![Benchmark](https://github.com/abossard/lite-gateway/actions/workflows/benchmark.yml/badge.svg)](https://github.com/abossard/lite-gateway/actions/workflows/benchmark.yml)
 [![Docker Build & Test](https://github.com/abossard/lite-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/abossard/lite-gateway/actions/workflows/docker-publish.yml)
 [![Release](https://github.com/abossard/lite-gateway/actions/workflows/release-yarp.yml/badge.svg)](https://github.com/abossard/lite-gateway/actions/workflows/release-yarp.yml)
 [![GHCR Version](https://ghcr-badge.egpl.dev/abossard/lite-gateway/latest_tag?trim=major&label=ghcr.io)](https://github.com/abossard/lite-gateway/pkgs/container/lite-gateway)
@@ -669,11 +670,11 @@ src/LiteGateway.YarpProxy/   ← the proxy (Program.cs + YARP config)
 config/                       ← example YARP config for Docker
 docs/                         ← deployment guides (Windows, etc.)
 scripts/                      ← build scripts (Windows AOT)
-archive/                      ← legacy benchmark code (see archive/README.md)
 ```
 
 ## Reference
 
+- [Benchmark Results](https://github.com/abossard/lite-gateway/actions/workflows/benchmark.yml) — load-test matrix posted to each run's summary
 - [YARP Documentation](https://microsoft.github.io/reverse-proxy/)
 - [YARP Config File Reference](https://microsoft.github.io/reverse-proxy/articles/config-files.html)
 - [YARP Request Transforms](https://microsoft.github.io/reverse-proxy/articles/transforms.html)
