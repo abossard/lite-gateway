@@ -6,6 +6,7 @@
 # Usage:
 #   docker compose up --build
 #   curl -s http://localhost:8080/ | jq .request.headers
+#   curl -s http://localhost:8081/ | jq .request.headers
 #   open http://localhost:18888   ← Aspire Dashboard (traces, metrics, logs)
 #
 # You should see the injected "X-Custom-Header" in the response.
@@ -30,6 +31,24 @@ services:
     environment:
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
       OTEL_SERVICE_NAME: "lite-gateway"
+    depends_on:
+      - backend
+      - aspire-dashboard
+  gateway_env_based:
+    build:
+      context: .
+      dockerfile: src/LiteGateway.YarpProxy/Dockerfile
+    ports:
+      - "8081:8080"
+    environment:
+      # Upstream backend
+      ReverseProxy__Clusters__upstream__Destinations__default__Address: "http://backend:3000"
+      # Header transform (shorthand)
+      PROXY_HEADER_X_CUSTOM_HEADER_V: "EXISTING_SPECIAL_VALUE"
+      EXISTING_SPECIAL_VALUE: "should-be-overridden"
+      # Telemetry
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://aspire-dashboard:18889"
+      OTEL_SERVICE_NAME: "lite-gateway-env"
     depends_on:
       - backend
       - aspire-dashboard
