@@ -5,6 +5,7 @@
 using System.IO.Compression;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.ResponseCompression;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
@@ -507,6 +508,10 @@ builder.Services.AddReverseProxy()
             };
         }
     });
+
+// ── Data Protection (suppress container warning — no keys needed for a proxy) ──
+builder.Services.AddDataProtection()
+    .UseEphemeralDataProtectionProvider();
 
 // ── Optional response compression ──────────────────────────────────────────
 if (compressionEnabled)
